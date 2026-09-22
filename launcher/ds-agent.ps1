@@ -268,10 +268,15 @@ if ($isWebsearch) {
     # project's defaults) would let a stuck one wander for half an hour. These are ceilings; only Claude can
     # raise them, with an explicit -MaxTurns or -TimeoutMinutes (a lead's spawn always passes its own).
     $explicitHere = -not $env:DS_RUN_ID
-    # A lead's websearch workers get narrower searches, so a tighter cap (lead-002: one ran 30 turns, 6 min).
+    # A lead's websearch workers get narrower searches, so tighter limits (lead-002: one ran 6 minutes).
+    # --max-turns is advisory, not a stop: websearch-008-file.1 ran 25 tool calls under a limit of 15 and
+    # finished ok, while websearch-006-childcap.1 stopped at exactly 15. A worker that chains tool calls
+    # without writing text in between slips past it. The timeout is the real cap: the launcher kills the
+    # process itself. Keep both, and keep the timeout tight enough to matter.
     $turnCap = if ($explicitHere) { 30 } else { 15 }
+    $timeCap = if ($explicitHere) { 10 } else { 5 }
     if (-not ($explicitHere -and $PSBoundParameters.ContainsKey('MaxTurns'))) { $MaxTurns = [Math]::Min($MaxTurns, $turnCap) }
-    if (-not ($explicitHere -and $PSBoundParameters.ContainsKey('TimeoutMinutes'))) { $TimeoutMinutes = [Math]::Min($TimeoutMinutes, 10) }
+    if (-not ($explicitHere -and $PSBoundParameters.ContainsKey('TimeoutMinutes'))) { $TimeoutMinutes = [Math]::Min($TimeoutMinutes, $timeCap) }
 }
 $tools = @()
 if (-not $isWebsearch) { $tools = @('Read', 'Grep', 'Glob') }

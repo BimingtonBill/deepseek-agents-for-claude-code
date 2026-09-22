@@ -280,6 +280,25 @@ ceilings. Claude can raise them with an explicit `-MaxTurns`/`-TimeoutMinutes`; 
 the caps, since `ds-spawn.ps1` passes its own values. The worker is also told to stop once two independent
 sources agree. `websearch-004-limits-check.1` ran under the caps (max_turns 30) in 20 s.
 
+## The turn limit is advisory; the timeout is the cap (2026-09-23)
+
+OpenSkyrim's three overnight websearch workers each ran past their limit: `max_turns` 15 against 23, 25
+and 19 tool calls, all finishing `ok`. Reproduced here, from a lead (`websearch-001-latest-versions.1`:
+34 tool calls under 15) and without one (`websearch-008-file.1`: 25 under 15). The launcher does pass
+`--max-turns 15` in every case: the dry runs are identical, and `websearch-006-childcap.1` and
+`websearch-005-turncap.1` stopped at exactly 15 and 3 with `error_max_turns`.
+
+The difference is in the transcripts. The run that stopped wrote text between its tool calls (15 tool
+messages, 14 text messages, longest unbroken tool streak 2). The runs that overran chained tool calls
+(25 tool messages against 3 text; streaks of 13, 18, 23). So Claude Code's turn counter tracks something
+closer to model replies than tool calls, and a worker that never stops to write slips past it. `turns` in
+the manifest is always tool calls + 1.
+
+**So the timeout is the real cap**, enforced by the launcher itself (`taskkill /T /F` after
+`-TimeoutMinutes`, recorded as `timed_out`; last seen firing on `probe-hard-max.1`). A websearch run now
+gets 10 minutes from Claude and **5 minutes from a lead**, with the turn caps (30 / 15) kept as a hint.
+Don't rely on `--max-turns` alone anywhere else either.
+
 **Still open.** The rule can't see a claim that reaches an edit-capable run by another route. For example,
 Claude pastes a web worker's finding into an edit brief for a run in the main checkout. That hop is Claude's
 own review, which the skill now asks for explicitly ("Web research and edits").

@@ -151,3 +151,37 @@ exactly as it does for coders Claude starts.
 | `lead-coders-probe.1` (read-only lead) | Started `impl-001-slugify.1` and `impl-002-wrap.1` in one call. They ran in parallel (65 s and 64 s), each in its own worktree, scope ok, acceptance `OK` (34 and 23 tests). The lead read both diffs, hand-checked edge cases, and gave "merge as is" for both, listing the spec choices it had fixed in the briefs. Main checkout untouched. |
 | Records | Both coders: kind `impl`, parent `lead-coders-probe.1`, lineage `claude/lead-coders-probe.1/impl-...`, depth 2; two `pilot.csv` rows, `pending-review`. |
 | Claude integrates | `-Integrate` both. The combined suite ran 57 tests, OK: the check neither coder could run, since each saw only its own tests. |
+
+## A lead cannot brief a read-only worker to run commands (2026-09-23)
+
+OpenSkyrim's overnight run: `research-001-glow-emissive.1` and `research-003-snow-ice.1`, both children of
+`lead-026`, died at `error_max_turns` (91 turns) with no report. The lead's own report says why: their
+briefs told them to run `python` and `cargo` commands, which read-only workers have no shell for at all.
+Both were rewritten and rerun with `max_turns` 200, so the night cost two wasted runs and the lead's time.
+The launcher already warns Claude when a brief names commands the worker may not run; a lead had no such
+check.
+
+`write_brief` now refuses a non-`impl-` brief that names a command in backticks (the launcher's rule: a
+tool word followed by whitespace or the end, or a `./` path; templates like `python <file>.py` and names
+like `Cargo.toml` don't count), and says to rewrite it as reading and analysis, or make it an `impl-` brief.
+
+**Evidence.** `lead-004-brief-guard.1`: asked to save a brief telling a worker to run
+`python -m unittest discover -s tests` and `cargo test -p shared`, `write_brief` refused with the two
+commands named. The lead rewrote the brief as a read-only job, added "Do not run any commands", ran it
+(`research-002-summarise-agents.1`, ok, 3 turns), and reported both the refusal and its correction.
+
+## A lead is told where each child's report is saved (2026-09-23)
+
+`lead-026-visual-gaps.1` (OpenSkyrim) wrote that one child's report "was not written to
+`local/agents/runs/` by the harness" and that it had recovered the text from the spawn output. It was
+wrong: `runs/research-006-snow-ice.1/report.md` is on disk, 25,935 bytes, written at 00:00, three minutes
+before the lead finished, and the launcher writes that file on every path that produces a result. The
+real gap was that nothing tells a lead where a child's report lives, so re-reading one means guessing a
+path.
+
+`ds-spawn.ps1` now prints `(also saved at <state dir>uns\<run id>eport.md)` above each report, using
+the launcher's own state-dir rule.
+
+**Evidence.** `lead-006-report-path.1`: spawned one worker, was given the path, read it with `Read`
+("11 lines, no error") and confirmed the file's body was "character-for-character" the report it had been
+handed, plus the header comment and the `[ds-agent]` footer line the file adds.

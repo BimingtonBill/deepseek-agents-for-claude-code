@@ -66,6 +66,12 @@ foreach ($j in $jobs) {
     if (-not $j.Proc.WaitForExit($left)) { & taskkill.exe /PID $j.Proc.Id /T /F 2>$null | Out-Null }
 }
 
+# Where the launcher keeps run records, by its own rule: DS_STATE_DIR, else the project's local/agents when
+# local/ exists, else ~/.claude-deepseek/agents. Only used to tell the lead where each report is saved.
+$stateDir = if ($env:DS_STATE_DIR) { $env:DS_STATE_DIR }
+            elseif (Test-Path -LiteralPath (Join-Path $Dir 'local')) { Join-Path $Dir 'localgents' }
+            else { Join-Path $HOME '.claude-deepseekgents' }
+
 $failed = 0
 foreach ($j in $jobs) {
     $text = [IO.File]::ReadAllText($j.Out, $utf8).TrimEnd()
@@ -75,6 +81,11 @@ foreach ($j in $jobs) {
     if (-not ($footer -match 'status=ok')) { $failed++ }
     Write-Output ''
     Write-Output "===== report from $runId ====="
+    # Where the same report is on disk, so a lead can re-read it instead of guessing a path or scraping
+    # this output. lead-026 (OpenSkyrim, 2026-09-23) reported a child's report as "not written by the
+    # harness" and recovered it from the spawn text; the file was there all along.
+    $reportPath = Join-Path (Join-Path $stateDir 'runs') (Join-Path $runId 'report.md')
+    if (Test-Path -LiteralPath $reportPath) { Write-Output "(also saved at $reportPath)" }
     if ($text) { Write-Output $text } else { Write-Output '(no output)' }
     if ($errText) { Write-Output $errText }
     Remove-Item -LiteralPath $j.Out, $j.Err -ErrorAction SilentlyContinue

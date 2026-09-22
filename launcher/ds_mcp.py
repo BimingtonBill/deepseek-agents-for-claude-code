@@ -26,6 +26,26 @@ WORK_DIR = os.environ.get('DS_WORK_DIR', os.getcwd())
 IMPL = os.environ.get('DS_IMPL_SCRIPT', '')
 MAX_CODERS = 3
 KINDS = ('research', 'websearch', 'impl', 'review', 'analysis', 'critic', 'digest')
+# Workers a lead starts are read-only and have no shell, so a brief telling one to run a command sends it
+# into workarounds until its turns run out (OpenSkyrim, 2026-09-23: research-001-glow-emissive and
+# research-003-snow-ice both died at 90 turns on denied python/cargo commands, and the lead had to rewrite
+# and rerun them). The launcher warns Claude about this; a lead only saw the wreckage. A command is a tool
+# word followed by a space or the end, or a ./ path; a name that merely starts with one (make_cand,
+# Cargo.toml) is not (H7). Only backticked text is checked, as in the launcher.
+COMMAND_WORDS = (r'python3?|py|pytest|cargo|rustc|npm|npx|node|pnpm|yarn|g\+\+|gcc|clang\+\+|cmake|make|'
+                 r'ninja|msbuild|dotnet|go|git|powershell|pwsh|bash|sh')
+
+
+def commands_in(brief_text):
+    """The commands a brief tells the worker to run, in the order they appear."""
+    found = []
+    for snippet in (m.group(1).strip() for m in re.finditer(r'`([^`\r\n]+)`', brief_text)):
+        if '<' in snippet and '>' in snippet:
+            continue  # a template like `python <file>.py`, not a command
+        if re.match(r'^(%s)(\s+\S|$)' % COMMAND_WORDS, snippet) or re.match(r'^\./\S', snippet):
+            if snippet not in found:
+                found.append(snippet)
+    return found
 
 TOOLS = []
 if 'wait' in ENABLED:
@@ -106,6 +126,14 @@ def call(name, args):
                 return text('an impl brief needs a line "Owned files: path/a, path/b" (the files the coder may '
                             'change, relative to the project root) and a line "Acceptance: <command>" (a test '
                             'command such as cargo test -p crate or python -m unittest discover -s tests)', True)
+        if not brief.startswith('impl-'):
+            runs = commands_in(content)
+            if runs:
+                return text('this worker will be read-only with no shell, so it cannot run: %s. Rewrite the '
+                            'brief to ask for reading, searching and analysis instead; if you only mean to name '
+                            'a command as background, write it without backticks. Work that must run commands '
+                            'belongs in an impl- brief (a coder in its own worktree) or with Claude.'
+                            % ', '.join(runs), True)
         BRIEF_DIR.mkdir(parents=True, exist_ok=True)
         path = BRIEF_DIR / (brief + '.md')
         path.write_text(content, encoding='utf-8')
