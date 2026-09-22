@@ -94,7 +94,7 @@ param(
     [switch]$CanSpawn,
     # Deepest level a spawned worker may sit at: Claude's own workers are depth 1.
     [int]$MaxDepth = 2,
-    # Launch even when the project's delegation level is 0 (the user asked for this worker explicitly).
+    # Kept so old commands still parse: the user asked for this worker explicitly (recorded as "forced").
     [switch]$Force,
     # Show the command, policy and environment instead of running the worker.
     [switch]$DryRun
@@ -219,20 +219,24 @@ $effortRequested = $Effort
 $Effort = switch ($Effort) { 'medium' { 'high' } 'xhigh' { 'max' } default { $Effort } }
 if ($Effort -ne $effortRequested) { Note "effort $effortRequested runs as $Effort on DeepSeek (its levels are low, high and max)" }
 
-# --- Delegation level (tools/ds_delegation.py): DS_DELEGATION, then the project config, then the user's, else 5 ---
-function Get-Level($Value) { $n = 0; if ($null -ne $Value -and [int]::TryParse([string]$Value, [ref]$n) -and $n -ge 0 -and $n -le 10) { return $n }; return $null }
-$delegation = Get-Level $env:DS_DELEGATION
-if ($null -eq $delegation -and $config) { $delegation = Get-Level $config.delegation }
+# --- Delegation level 1-5 (tools/ds_delegation.py): DS_DELEGATION_LEVEL, then the project config, then the
+# user's, else 3. An old 0-10 "delegation" value (or DS_DELEGATION) at the same place is mapped onto 1-5.
+# The level only steers Claude; the launcher records it in the manifest and refuses nothing. ---
+function Get-Level($New, $Old) {
+    $n = 0
+    if ($null -ne $New -and [int]::TryParse([string]$New, [ref]$n) -and $n -ge 1 -and $n -le 5) { return $n }
+    if ($null -ne $Old -and [int]::TryParse([string]$Old, [ref]$n) -and $n -ge 0 -and $n -le 10) { return @(1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5)[$n] }
+    return $null
+}
+$delegation = Get-Level $env:DS_DELEGATION_LEVEL $env:DS_DELEGATION
+if ($null -eq $delegation -and $config) { $delegation = Get-Level $config.delegationLevel $config.delegation }
 if ($null -eq $delegation) {
     $userConfig = Join-Path $HOME '.claude-deepseek\config.json'
     if (Test-Path -LiteralPath $userConfig) {
-        try { $delegation = Get-Level ([IO.File]::ReadAllText($userConfig, $utf8) | ConvertFrom-Json).delegation } catch { }
+        try { $u = [IO.File]::ReadAllText($userConfig, $utf8) | ConvertFrom-Json; $delegation = Get-Level $u.delegationLevel $u.delegation } catch { }
     }
 }
-if ($null -eq $delegation) { $delegation = 5 }
-if ($delegation -eq 0 -and -not $Force -and -not $DryRun) {
-    Fail 'Delegation level is 0 here: Claude does the work itself. Pass -Force only if the user asked for this worker.'
-}
+if ($null -eq $delegation) { $delegation = 3 }
 
 $claude = Find-Claude
 if (-not $claude) { Fail 'Claude Code was not found. Install the Claude Code CLI, or set DEEPSEEK_AGENT_CLAUDE to the path of claude.exe.' }
@@ -550,8 +554,7 @@ if ($DryRun) {
     "dir:       $Dir"
     "run:       $runId ($Kind) - $Title"
     "lineage:   $lineage (depth $depth of $maxDepthHere)"
-    $levelNote = if ($delegation -ne 0) { '' } elseif ($Force) { ' (forced)' } else { ' - a real launch would be refused' }
-    "delegation: level $delegation of 10$levelNote"
+    "delegation: level $delegation of 5"
     "config:    $(if ($config) { $configPath } else { '(none)' })"
     "mode:      $Mode (permission mode $permissionMode), effort $Effort, $MaxTurns turns, ${TimeoutMinutes}m timeout"
     "tools:     $($tools -join ',')"

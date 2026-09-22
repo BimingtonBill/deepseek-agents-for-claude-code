@@ -68,7 +68,7 @@ Alongside the manifest the launcher keeps `<stateDir>/<label>.json` while a run 
   "lineage": "claude/lead-004-ui-audit.1/research-085-radial.1", "depth": 2,
   "state": "completed",
   "mode": "read", "model": "deepseek-flash[1m]", "effort": "high", "effort_requested": "high", "max_turns": 80,
-  "crosstalk": true, "subagents": false, "can_spawn": false, "delegation": 7, "forced": false,
+  "crosstalk": true, "subagents": false, "can_spawn": false, "delegation": 4, "forced": false,
   "brief": "...\\runs\\lead-004-ui-audit.1\\briefs\\research-085-radial.md",
   "resumed_session": null, "resumes": 0,
   "session_id": "...", "pid": 1234, "transcript": "...jsonl",
@@ -81,7 +81,7 @@ Alongside the manifest the launcher keeps `<stateDir>/<label>.json` while a run 
 Fields to know:
 - `effort` is what DeepSeek ran; `effort_requested` is what was asked (`medium` runs as `high`, `xhigh` as `max`;
   see `effort.md`).
-- `delegation` is the project's delegation level at launch, and `forced` says `-Force` overrode level 0.
+- `delegation` is the project's delegation level at launch (1-5; runs before the change recorded 0-10), and `forced` says the launch was given `-Force`.
 - `turns` and the token counts are totals across every turn and every resume of the run. `tokens_in` is
   uncached input.
 - A `-SubAgents` run also carries `subagents_run`, `subagent_tokens_in` and `subagent_tokens_out`, which are 0

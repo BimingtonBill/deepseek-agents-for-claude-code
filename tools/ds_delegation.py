@@ -1,19 +1,22 @@
-"""The delegation level: how much Claude hands to DeepSeek workers, from 0 (never) to 10 (everything).
+"""The delegation level: how much Claude hands to DeepSeek workers, from 1 (only when asked) to 5 (everything).
 
     python tools/ds_delegation.py                     the effective level here, where it comes from, and what it means
-    python tools/ds_delegation.py --set 7             set it for this project (.deepseek-agents.json "delegation")
-    python tools/ds_delegation.py --set 5 --global    set your default for every project (~/.claude-deepseek/config.json)
-    python tools/ds_delegation.py --set 7 --agents-md also write the level's rules into this project's AGENTS.md
-    python tools/ds_delegation.py --table             all eleven levels
+    python tools/ds_delegation.py --set 4             set it for this project (.deepseek-agents.json "delegationLevel")
+    python tools/ds_delegation.py --set 3 --global    set your default for every project (~/.claude-deepseek/config.json)
+    python tools/ds_delegation.py --set 4 --agents-md also write the level's rules into this project's AGENTS.md
+    python tools/ds_delegation.py --table             all five levels
 
-Where the level comes from, first match wins: the DS_DELEGATION environment variable, the project's
-.deepseek-agents.json, ~/.claude-deepseek/config.json, else 5.
+Where the level comes from, first match wins: the DS_DELEGATION_LEVEL environment variable, the project's
+.deepseek-agents.json, ~/.claude-deepseek/config.json, else 3.
+
+The scale used to run from 0 to 10, stored as "delegation" (and DS_DELEGATION). Those still work: when
+no 1-5 value is set at the same place, an old value is read and mapped (0-2 -> 1, 3-4 -> 2, 5-6 -> 3,
+7-8 -> 4, 9-10 -> 5). --set writes the new key and drops the old one.
 
 The level steers Claude, not the workers, so Claude has to see it. The deepseek-agents skill reads it,
 but the skill only loads when workers come up. --agents-md puts the rules in the project's AGENTS.md,
-which Claude reads at the start of every session; without it, levels above 5 can't make Claude reach
-for workers unprompted. The launcher enforces one thing itself: at level 0 it refuses to start a
-worker unless it is given -Force (the user asked for one explicitly).
+which Claude reads at the start of every session; without it, levels above 3 can't make Claude reach
+for workers unprompted.
 """
 import argparse
 import json
@@ -22,7 +25,7 @@ import re
 import sys
 from pathlib import Path
 
-DEFAULT = 5
+DEFAULT = 3
 GLOBAL_CONFIG = Path.home() / '.claude-deepseek' / 'config.json'
 # Where tools/install-skill.ps1 puts this script.
 INSTALLED_TOOL = Path.home() / '.claude' / 'skills' / 'deepseek-agents' / 'tools' / 'ds_delegation.py'
@@ -44,41 +47,28 @@ MISSING_TOOLS = ('Missing tools: before starting a job, check that the tools it 
                  'approach or a hand-written substitute. Continue without it only if the user chooses to.')
 
 LEVELS = {
-    0: ('Off', 'Claude does everything itself. Never launch a DeepSeek worker, not even an advisor. '
-               'If the user explicitly asks for one, launch it with -Force.'),
-    1: ('On request only', 'Use workers only when the user asks for them in this conversation.'),
-    2: ('Rare', 'Suggest a worker when a task is a large read-only survey (many files, a big dump, '
-                'long logs), but ask before launching.'),
-    3: ('Big reads', 'Delegate large read-only research and surveys without asking: sweeping many '
-                     'files, reading big dumps or logs, mapping unfamiliar code. Claude writes all code '
-                     'and does all small lookups itself.'),
-    4: ('Research and review', 'Delegate research of any size that takes more than a few searches, '
-                               'plus independent reviews and analyses of finished runs. Claude writes '
-                               'all code.'),
-    5: ('Balanced (default)', 'Delegate research, reviews and run analyses by default. Delegate '
-                              'bounded, self-contained implementation (a new parser, validator, tool or '
-                              'test file with a fixed interface) through tools/ds_impl.ps1. Claude keeps '
-                              'anything touching shared interfaces or more than a few files.'),
-    6: ('Workers first for bounded work', 'As 5, and prefer a worker for any task that can be written as a '
-                                          'standalone brief with a clear check, including documentation and '
-                                          'test writing. Run independent tasks in parallel (about four at a '
-                                          'time) with an independent reviewer on implementation.'),
-    7: ('Claude plans and reviews', 'Claude plans, writes briefs, reviews and integrates; workers do the '
-                                    'exploration and most coding, including multi-file changes in their own '
-                                    'worktrees with owned-file lists. Use a DeepSeek lead (-CanSpawn) for jobs '
-                                    'that split into independent parts, and -Crosstalk for workers whose work '
-                                    'touches.'),
-    8: ('Heavy delegation', 'As 7, and Claude avoids reading source itself beyond what review needs: '
-                            'ask a worker to locate, summarize or trace code instead. Keep several workers '
-                            'busy whenever there is independent work.'),
-    9: ('Near-total', 'As 8, and delegate even small edits and lookups when a worker can do them while '
-                      'Claude does something else. Claude writes code only to integrate or to fix a '
-                      'worker result faster than a resume would.'),
-    10: ('Everything', 'Claude only orchestrates: every task, however small, goes to a worker. Claude '
-                       'reads briefs, reports and diffs, integrates, and talks to the user. If no worker '
-                       'can do a step (it needs this conversation, a GUI, or the user), Claude does it '
-                       'and says why.'),
+    1: ('Only when asked', 'Claude does the work itself and launches a worker only when the user asks for '
+                           'one in this conversation.'),
+    2: ('Research and review', 'Delegate research that takes more than a few searches, large read-only '
+                               'surveys (many files, big dumps, long logs), independent reviews and '
+                               'analyses of finished runs. Claude writes all code.'),
+    3: ('Balanced (default)', 'As 2, plus bounded, self-contained implementation (a new parser, validator, '
+                              'tool or test file with a fixed interface) through tools/ds_impl.ps1, and any '
+                              'task that can be written as a standalone brief with a clear check. Run '
+                              'independent tasks in parallel, with an independent reviewer on implementation. '
+                              'Claude keeps anything touching shared interfaces or more than a few files.'),
+    4: ('Claude manages', 'Claude plans, writes briefs, reviews and integrates; workers do the exploration '
+                          'and most coding, including multi-file changes in their own worktrees with '
+                          'owned-file lists. Claude avoids reading source beyond what review needs: ask a '
+                          'worker to locate, summarize or trace code instead. Keep several workers busy, and '
+                          'use a DeepSeek lead (-CanSpawn) for jobs that split into independent parts.'),
+    5: ('Everything', 'Claude only orchestrates: every task, even small edits and lookups, goes to a worker. '
+                      'Claude reads briefs, reports and diffs, integrates, and talks to the user. If no '
+                      'worker can do a step (it needs this conversation, a GUI, or the user), Claude does it '
+                      'and says why.'),
 }
+KEY, LEGACY_KEY = 'delegationLevel', 'delegation'
+ENV, LEGACY_ENV = 'DS_DELEGATION_LEVEL', 'DS_DELEGATION'
 
 
 def _project_root():
@@ -107,39 +97,50 @@ def _valid(value):
         level = int(value)
     except (TypeError, ValueError):
         return None
-    return level if 0 <= level <= 10 else None
+    return level if 1 <= level <= 5 else None
+
+
+def from_legacy(value):
+    """An old 0-10 level on the 1-5 scale, or None."""
+    try:
+        old = int(value)
+    except (TypeError, ValueError):
+        return None
+    return (1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5)[old] if 0 <= old <= 10 else None
 
 
 def effective(project, env=None, global_config=None):
     """(level, source) for a project folder."""
     env = os.environ if env is None else env
     global_config = GLOBAL_CONFIG if global_config is None else Path(global_config)
-    level = _valid(env.get('DS_DELEGATION'))
+    level = _valid(env.get(ENV))
+    if level is None:
+        level = from_legacy(env.get(LEGACY_ENV))
     if level is not None:
-        return level, 'DS_DELEGATION environment variable'
-    config = _read_json(Path(project) / '.deepseek-agents.json') or {}
-    level = _valid(config.get('delegation'))
-    if level is not None:
-        return level, str(Path(project) / '.deepseek-agents.json')
-    config = _read_json(global_config) or {}
-    level = _valid(config.get('delegation'))
-    if level is not None:
-        return level, str(global_config)
+        return level, 'environment variable'
+    for path in (Path(project) / '.deepseek-agents.json', global_config):
+        config = _read_json(path) or {}
+        level = _valid(config.get(KEY))
+        if level is None:
+            level = from_legacy(config.get(LEGACY_KEY))
+        if level is not None:
+            return level, str(path)
     return DEFAULT, 'default'
 
 
 def describe(level):
     name, rule = LEVELS[level]
-    return 'Delegation level %d of 10 - %s. %s' % (level, name, rule)
+    return 'Delegation level %d of 5 - %s. %s' % (level, name, rule)
 
 
 def set_level(path, level):
-    """Write "delegation": level into a JSON config, keeping every other key and their order."""
+    """Write "delegationLevel": level into a JSON config (dropping an old "delegation"), keeping every other key and their order."""
     path = Path(path)
     data = _read_json(path) if path.exists() else {}
     if data is None:
         raise SystemExit('%s is not valid JSON; fix it first' % path)
-    data['delegation'] = level
+    data.pop(LEGACY_KEY, None)
+    data[KEY] = level
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
 
@@ -147,7 +148,7 @@ def set_level(path, level):
 def agents_block(level):
     return '\n'.join([
         BEGIN,
-        '## DeepSeek delegation level: %d of 10 (%s)' % (level, LEVELS[level][0]),
+        '## DeepSeek delegation level: %d of 5 (%s)' % (level, LEVELS[level][0]),
         '',
         LEVELS[level][1],
         '',
@@ -155,7 +156,7 @@ def agents_block(level):
         '',
         MISSING_TOOLS,
         '',
-        'This block is generated. Change the level with `python "%s" --set <0-10> --agents-md` '
+        'This block is generated. Change the level with `python "%s" --set <1-5> --agents-md` '
         'from this folder, or ask Claude to. The full scale is in the deepseek-agents skill.'
         % INSTALLED_TOOL.as_posix(),
         END,
@@ -182,7 +183,7 @@ def write_agents_md(project, level):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--project', default=str(_project_root()))
-    parser.add_argument('--set', type=int, choices=range(0, 11), metavar='0-10')
+    parser.add_argument('--set', type=int, choices=range(1, 6), metavar='1-5')
     parser.add_argument('--global', dest='is_global', action='store_true', help='with --set: your default for all projects')
     parser.add_argument('--agents-md', action='store_true', help="write the level's rules into the project's AGENTS.md")
     parser.add_argument('--table', action='store_true', help='print all levels')
@@ -191,8 +192,8 @@ def main(argv=None):
     project = Path(args.project).resolve()
 
     if args.table:
-        for n in range(11):
-            print('%2d  %-32s %s' % (n, LEVELS[n][0], LEVELS[n][1]))
+        for n in sorted(LEVELS):
+            print('%d  %-22s %s' % (n, LEVELS[n][0], LEVELS[n][1]))
         print('\n' + ALWAYS)
         return 0
     if args.set is not None:
@@ -206,8 +207,8 @@ def main(argv=None):
         print(describe(level))
         return 0
     print('%s\n(from %s)\n\n%s' % (describe(level), source, ALWAYS))
-    if source == 'DS_DELEGATION environment variable' and args.set is not None:
-        print('\nNote: DS_DELEGATION is set and overrides the value just written.')
+    if source == 'environment variable' and args.set is not None:
+        print('\nNote: %s (or the older %s) is set and overrides the value just written.' % (ENV, LEGACY_ENV))
     return 0
 
 

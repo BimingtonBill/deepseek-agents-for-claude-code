@@ -150,23 +150,17 @@ A watcher only waits: stopping one in the panel does not stop the worker (`tools
 
 ## Delegation level: how much to hand off
 
-Each project has a delegation level from 0 to 10 that says how much of the work goes to workers. Check it before deciding whether to delegate: from the project folder, run `python "$HOME/.claude/skills/deepseek-agents/tools/ds_delegation.py" --brief`. It prints the level and its rule. The level comes from, first match wins: the `DS_DELEGATION` environment variable, `"delegation"` in the project's `.deepseek-agents.json`, `~/.claude-deepseek/config.json`, else 5. When the project's AGENTS.md has a generated "DeepSeek delegation level" block, that block is the same rule.
+Each project has a delegation level from 1 to 5 that says how much of the work goes to workers. Check it before deciding whether to delegate: from the project folder, run `python "$HOME/.claude/skills/deepseek-agents/tools/ds_delegation.py" --brief`. It prints the level and its rule. The level comes from, first match wins: the `DS_DELEGATION_LEVEL` environment variable, `"delegationLevel"` in the project's `.deepseek-agents.json`, `~/.claude-deepseek/config.json`, else 3. An old 0-10 `"delegation"` value still works and is mapped (7 reads as 4). When the project's AGENTS.md has a generated "DeepSeek delegation level" block, that block is the same rule.
 
 | Level | Rule |
 |---|---|
-| 0 | Off. Never launch a worker; the launcher refuses. Use `-Force` only if the user explicitly asks for one. |
-| 1 | Only when the user asks. |
-| 2 | Suggest a worker for large read-only surveys, but ask first. |
-| 3 | Delegate big read-only research without asking; Claude writes all code. |
-| 4 | Delegate all non-trivial research, reviews and run analyses; Claude writes all code. |
-| 5 | Default. As 4, plus bounded self-contained implementation through `ds_impl.ps1`. |
-| 6 | Workers first for anything that can be briefed with a clear check; about four in parallel, with reviewers. |
-| 7 | Claude plans, briefs, reviews and integrates; workers explore and do most coding. Leads and crosstalk where they fit. |
-| 8 | As 7, and Claude doesn't read source beyond what review needs; keep several workers busy. |
-| 9 | As 8, and delegate even small edits and lookups. |
-| 10 | Claude only orchestrates; every task goes to a worker unless it needs this conversation, a GUI or the user. |
+| 1 | Only when asked. Claude does the work itself unless the user asks for a worker. |
+| 2 | Research and review: delegate non-trivial research, big read-only surveys, reviews and run analyses. Claude writes all code. |
+| 3 | Default. As 2, plus bounded self-contained implementation through `ds_impl.ps1` and anything that can be briefed with a clear check; parallel, with reviewers. |
+| 4 | Claude manages: plans, briefs, reviews and integrates; workers explore and do most coding. Claude doesn't read source beyond what review needs; several workers busy, leads where they fit. |
+| 5 | Everything: Claude only orchestrates; every task, even small edits and lookups, goes to a worker unless it needs this conversation, a GUI or the user. |
 
-At **every** level Claude keeps the conversation with the user, design decisions, integration, security-sensitive changes, and review of every worker result it acts on. The dial moves work, not the quality bar. When the user says "use workers more" or "less", or names a number, set it with `ds_delegation.py --set <n> --agents-md` from the project folder (`--global` sets their default for all projects) and say what changed.
+At **every** level Claude keeps the conversation with the user, design decisions, integration, security-sensitive changes, and review of every worker result it acts on. The dial moves work, not the quality bar. When the user says "use workers more" or "less", or names a number, set it with `ds_delegation.py --set <1-5> --agents-md` from the project folder (`--global` sets their default for all projects) and say what changed.
 
 ## Project policy: .deepseek-agents.json
 
@@ -181,7 +175,7 @@ A project can keep its worker policy in `.deepseek-agents.json` at its root, so 
   "allowTools": "Bash(git add *),Bash(git commit *)",
   "_note": "allowTools applies to edit-mode runs only; read mode stays Read/Grep/Glob",
   "stateDir": "local/agents",
-  "delegation": 5,
+  "delegationLevel": 3,
   "defaults": { "mode": "edit", "effort": "max", "maxTurns": 400, "timeoutMinutes": 150 }
 }
 ```

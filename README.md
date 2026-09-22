@@ -74,31 +74,25 @@ Or type `/deepseek-agents` to switch it on for the session.
 
 ## How much should Claude hand off? The delegation dial
 
-A setting from **0 to 10** tells Claude how much work to give DeepSeek. Higher means Claude hands off more
+A setting from **1 to 5** tells Claude how much work to give DeepSeek. Higher means Claude hands off more
 and uses less of your Claude limits, but more of the work is first done by DeepSeek, which is cheaper and
 less reliable, so Claude spends its time checking instead.
 
 | Level | Name | What Claude does |
 |:---:|---|---|
-| **0** | Off | Does everything itself and never uses DeepSeek. |
-| **1** | Only when asked | Uses DeepSeek only when you ask it to. |
-| **2** | Suggests | May *suggest* DeepSeek for big reading jobs, but asks you first. |
-| **3** | Big reading jobs | Hands off large reading and searching (many files, long logs). Writes all code itself. |
-| **4** | Research and checking | Hands off research, reviews and test-result analysis. Writes all code itself. |
-| **5** | **Balanced (the default)** | As 4, and also hands off small, self-contained pieces of code (a new tool, a test file). |
-| **6** | DeepSeek first | Anything that can be clearly described goes to DeepSeek, several jobs at once, with a DeepSeek reviewer on code. |
-| **7** | **Claude manages** | Claude plans, writes the instructions, checks and fits the pieces together. DeepSeek does most of the exploring and coding. *A good choice for bigger projects.* |
-| **8** | Heavy | As 7, and Claude avoids reading code itself beyond what checking needs. |
-| **9** | Nearly everything | As 8, and even small edits and lookups go to DeepSeek. |
-| **10** | Everything | Claude only manages: every task goes to DeepSeek unless it needs you or this conversation. |
+| **1** | Only when asked | Does everything itself, and uses DeepSeek only when you ask it to. |
+| **2** | Research and checking | Hands off research, reading through lots of files, and reviews. Writes all code itself. |
+| **3** | **Balanced (the default)** | As 2, and also hands off small, self-contained pieces of code (a new tool, a test file), several at once. |
+| **4** | **Claude manages** | Claude plans, writes the instructions, checks and fits the pieces together. DeepSeek does most of the exploring and coding. *A good choice for bigger projects.* |
+| **5** | Everything | Claude only manages: every task, however small, goes to DeepSeek unless it needs you or this conversation. |
 
 **What never changes, at any level:** Claude talks to you, makes the design decisions, puts the pieces
 together, handles anything security-sensitive, and **checks every piece of DeepSeek work before using it**.
 
 **How to change it:** just tell Claude, for example:
 
-- *"Set the DeepSeek delegation level to 7 for this project."*
-- *"Make DeepSeek delegation 3 my default for all projects."*
+- *"Set the DeepSeek delegation level to 4 for this project."*
+- *"Make DeepSeek delegation 2 my default for all projects."*
 
 ## Is it safe?
 
