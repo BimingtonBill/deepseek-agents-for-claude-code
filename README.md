@@ -1,83 +1,149 @@
 # DeepSeek agents for Claude Code
 
-Claude plans and reviews while cheap DeepSeek workers research, code and check in parallel.
+**Give Claude a team of cheap helpers.** Claude stays in charge and does the thinking that matters, while
+DeepSeek AI "workers" do the legwork in the background: reading through code, researching, writing
+first drafts of code, and checking each other's work.
 
 > An independent community project. It is not made or endorsed by Anthropic or DeepSeek.
 
-This kit lets Claude (in Claude Code) hand work to cheap DeepSeek "workers" that run alongside it: Claude
-plans and checks, the workers research, write code and review. It adds two Claude Code skills,
-`deepseek-agents` and `advisor-loop`.
+## What is this, in plain words?
+
+[Claude Code](https://claude.com/claude-code) is Claude working directly on the files on your computer.
+It's great, but big jobs eat into your Claude usage limits, and Claude does one thing at a time.
+
+This add-on lets Claude act like a **manager**:
+
+- You ask Claude for something, as usual.
+- Claude breaks the job into pieces and hands some of them to **DeepSeek workers**: separate, much
+  cheaper AI helpers that run on your computer in the background.
+- While they work, Claude keeps working on its own part.
+- When a worker finishes, Claude **checks its work** before using it. Nothing a worker does goes in
+  without Claude looking at it.
+
+You'll see the workers in Claude's **Background tasks** panel, with names like
+`DeepSeek research #004: find where the game loads save files`.
+
+## What does it cost?
+
+- **DeepSeek charges per use, and it's cheap.** A typical worker task costs a few cents, and big ones
+  up to about 20 cents. Topping up $5 goes a long way.
+- **It saves your Claude usage.** The heavy reading and drafting happens on DeepSeek, so your Claude
+  plan lasts longer.
+- You still need your normal Claude plan that includes Claude Code.
 
 ## What you need
 
-- **Windows** (the scripts are PowerShell).
-- **Claude Code**: the Claude desktop app (its Code tab) or the Claude Code command-line tool.
-- **Python 3** on your PATH (`python --version` should work in a terminal).
-- **A DeepSeek API account** with some credit: https://platform.deepseek.com. Workers are cheap, but
-  they are not free, and they stop with an error when the balance runs out.
+- A **Windows** computer.
+- The **Claude desktop app** ([download](https://claude.ai/download)) with a plan that includes Claude
+  Code, or the Claude Code command-line tool.
+- A **DeepSeek account** with a little credit. Sign up at [platform.deepseek.com](https://platform.deepseek.com),
+  add credit under **Top up**, and create a key under **API keys**. Keep that key handy: you'll paste it
+  once during setup.
+- **Python 3.** If you don't have it, setup tells you how to get it.
 
-## Setup (5 minutes)
+## Install it: the easy way
 
-1. **Save your DeepSeek API key** so the workers can use it. Open PowerShell and paste this, then paste
-   your key when it asks (it is typed hidden, and stays on your computer only):
+Open the Claude desktop app, go to the **Code** tab, start a session, and paste this in:
 
-   ```powershell
-   $k = Read-Host 'DeepSeek API key' -AsSecureString; [Environment]::SetEnvironmentVariable('DEEPSEEK_API_KEY', [Net.NetworkCredential]::new('', $k).Password, 'User')
-   ```
+```text
+Please install "DeepSeek agents for Claude Code" for me.
 
-   Never paste the key into a Claude chat.
+1. Download https://github.com/BimingtonBill/deepseek-agents-for-claude-code/releases/latest/download/deepseek-agents-for-claude-code.zip into a new folder called "deepseek-agents-setup" in my Downloads folder, and unzip it there.
+2. Read setup.ps1 in the unzipped folder so you know what it does, then run it:
+   powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1
+   It installs the skills and checks for Python and Claude Code. If I haven't saved a DeepSeek API key yet, it opens a separate window where I type the key myself.
+3. Tell me in plain words what it reported and what I need to do next.
 
-2. **Install the skills.** Download `deepseek-agents-for-claude-code.zip` from the
-   [latest release](https://github.com/BimingtonBill/deepseek-agents-for-claude-code/releases/latest)
-   (or use this folder if you already have it). Unzip it anywhere, then double-click `install.cmd`
-   (or run `powershell -NoProfile -ExecutionPolicy Bypass -File tools\install-skill.ps1`).
-   It copies everything into `%USERPROFILE%\.claude\skills\`, backing up anything already there.
+Never ask me to type or paste my DeepSeek API key into this chat.
+```
 
-3. **Restart Claude** (close and reopen the app, or start a new `claude` session) so it sees the skills.
+Claude will ask your permission before it downloads and runs things; say yes. If a window pops up
+asking for your **DeepSeek API key**, paste the key there (nothing shows as you paste; that's normal)
+and press Enter. It checks the key with DeepSeek and shows your balance.
+
+When it's done, **close and reopen the Claude app.**
+
+> **Why a separate window for the key?** Your key is like a password for your DeepSeek account. Anything
+> typed into a Claude chat is saved in the chat. The separate window keeps the key out of it, and stores
+> it privately on your computer.
+
+## Install it: by hand
+
+1. Download `deepseek-agents-for-claude-code.zip` from the
+   [latest release](https://github.com/BimingtonBill/deepseek-agents-for-claude-code/releases/latest) and unzip it.
+2. Double-click **`install.cmd`** in the unzipped folder. It installs everything and, if needed, opens the
+   window for your DeepSeek key.
+3. Close and reopen the Claude app.
 
 ## Using it
 
-In any Claude Code session, ask for it in plain words, for example:
+Just ask Claude in plain words, in any project:
 
-> Use DeepSeek workers to find every place this project reads the config file, and summarise them.
+- *"Use DeepSeek workers to find every place this project reads its settings file, and summarise them."*
+- *"Have DeepSeek research how other mods handle save files while you work on the menu."*
+- *"Get a DeepSeek worker to review the change you just made."*
 
-or type `/deepseek-agents`. Claude writes a brief, starts the workers in the background, keeps working
-itself, and checks what they send back. Running workers show up in the app's Background tasks panel as
-`DeepSeek <kind> #<number>: <what it does>`.
+Or type `/deepseek-agents` to switch it on for the session.
 
-**How much Claude hands off** is a dial from 0 (never) to 10 (everything). The default is 5. To change it
-for one project, open a terminal in that project's folder and run:
+## How much should Claude hand off? The delegation dial
 
-```powershell
-python "$HOME\.claude\skills\deepseek-agents\tools\ds_delegation.py" --set 7 --agents-md
-```
+A setting from **0 to 10** tells Claude how much work to give DeepSeek. Higher means Claude hands off more
+and uses less of your Claude limits, but more of the work is first done by DeepSeek, which is cheaper and
+less reliable, so Claude spends its time checking instead.
 
-`--agents-md` writes the rule into the project's AGENTS.md so every Claude session there sees it.
-Use `--global` instead of `--agents-md` to set your default for all projects. `--table` shows every level.
+| Level | Name | What Claude does |
+|:---:|---|---|
+| **0** | Off | Does everything itself and never uses DeepSeek. |
+| **1** | Only when asked | Uses DeepSeek only when you ask it to. |
+| **2** | Suggests | May *suggest* DeepSeek for big reading jobs, but asks you first. |
+| **3** | Big reading jobs | Hands off large reading and searching (many files, long logs). Writes all code itself. |
+| **4** | Research and checking | Hands off research, reviews and test-result analysis. Writes all code itself. |
+| **5** | **Balanced (the default)** | As 4, and also hands off small, self-contained pieces of code (a new tool, a test file). |
+| **6** | DeepSeek first | Anything that can be clearly described goes to DeepSeek, several jobs at once, with a DeepSeek reviewer on code. |
+| **7** | **Claude manages** | Claude plans, writes the instructions, checks and fits the pieces together. DeepSeek does most of the exploring and coding. *A good choice for bigger projects.* |
+| **8** | Heavy | As 7, and Claude avoids reading code itself beyond what checking needs. |
+| **9** | Nearly everything | As 8, and even small edits and lookups go to DeepSeek. |
+| **10** | Everything | Claude only manages: every task goes to DeepSeek unless it needs you or this conversation. |
 
-## Good to know
+**What never changes, at any level:** Claude talks to you, makes the design decisions, puts the pieces
+together, handles anything security-sensitive, and **checks every piece of DeepSeek work before using it**.
 
-- **Workers can't see your Claude login or history.** They run with only your DeepSeek key, and only
-  read the project folder you point them at.
-- **Workers are cheaper than Claude but less reliable.** Claude reviews everything they do before using
-  it; keep it that way.
-- **Missing tools:** if a job needs something you don't have installed (a compiler, a Python package),
-  Claude is told to stop and ask you to install it rather than work around it.
-- **Stopping a runaway worker:** `powershell -File "$HOME\.claude\skills\deepseek-agents\tools\ds_status.ps1"`
-  from the project folder lists running workers; add `-Stop <name>` to stop one.
+**How to change it:** just tell Claude, for example:
+
+- *"Set the DeepSeek delegation level to 7 for this project."*
+- *"Make DeepSeek delegation 3 my default for all projects."*
+
+## Is it safe?
+
+- **Workers only see the project you point them at.** They can't see your Claude account, your chats or
+  other folders.
+- **Your DeepSeek key stays on your computer**, saved for your Windows account only.
+- **Workers can't change files they weren't given.** Coding tasks happen in a separate copy of your
+  project, and Claude reviews the changes before bringing them in.
+- **If a job needs a program you don't have**, Claude stops and asks you to install it rather than
+  working around it.
 
 ## If something goes wrong
 
-| Message | What to do |
+| You see | What to do |
 |---|---|
-| `DEEPSEEK_API_KEY is not set` | Do setup step 1 again. |
-| `DeepSeek rejected DEEPSEEK_API_KEY (401)` | The key is wrong; create a new one on platform.deepseek.com and redo step 1. |
-| `balance is too low` / `402` | Add credit to your DeepSeek account. |
-| `Claude Code was not found` | Install the Claude desktop app or Claude Code, or set `DEEPSEEK_AGENT_CLAUDE` to the full path of `claude.exe`. |
-| `crosstalk is off for this run: it needs Python` | Install Python 3 and make sure `python` works in a terminal. |
+| `DEEPSEEK_API_KEY is not set` | Run `install.cmd` from the unzipped folder again; it reopens the key window. |
+| `DeepSeek rejected DEEPSEEK_API_KEY (401)` | The key is wrong or was deleted. Create a new one at platform.deepseek.com and run `install.cmd` again. |
+| `balance is too low` / `402` | Add credit at [platform.deepseek.com/top_up](https://platform.deepseek.com/top_up). |
+| `Claude Code was not found` | Install the Claude desktop app and open its Code tab once. |
+| `it needs Python` | Install Python: `winget install Python.Python.3.12`, then restart Claude. |
+| A worker seems stuck | Ask Claude: *"Show me the running DeepSeek workers and stop the stuck one."* |
 
-The `docs/` folder explains how it all works, if you're curious.
+## For the technically curious
+
+- `skill/`: the two Claude Code skills (`deepseek-agents`, `advisor-loop`) that teach Claude how to lead workers.
+- `launcher/`: `ds-agent.ps1` starts one worker as a headless Claude Code process pointed at DeepSeek's
+  Anthropic-compatible API, with its own permissions, a 128k output cap and a run record.
+- `tools/`: coding tasks in isolated git worktrees (`ds_impl.ps1`), run status, the run manifest, the
+  delegation dial, result and citation checkers.
+- `docs/design/`: how naming, crosstalk between workers, DeepSeek leads, effort levels and the
+  delegation dial work, with the test evidence behind each.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [`LICENSE`](LICENSE).

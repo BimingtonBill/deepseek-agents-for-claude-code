@@ -1,7 +1,4 @@
 @echo off
-rem Installs the DeepSeek worker skills into %USERPROFILE%\.claude\skills (backs up any existing copy).
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\install-skill.ps1"
-echo.
-if defined DEEPSEEK_API_KEY (echo DeepSeek key: found.) else (powershell -NoProfile -Command "if ([Environment]::GetEnvironmentVariable('DEEPSEEK_API_KEY','User')) { 'DeepSeek key: found.' } else { 'DeepSeek key: NOT SET YET - see step 1 in README-FIRST.md.' }")
-echo Now restart Claude so it picks up the skills.
+rem Double-click to set up DeepSeek agents for Claude Code (runs setup.ps1 next to this file).
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1"
 pause
