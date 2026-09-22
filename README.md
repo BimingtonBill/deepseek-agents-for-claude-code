@@ -62,6 +62,21 @@ your Claude plan (which you still need) lasts longer.
 
 *An independent community project, not made or endorsed by Anthropic or DeepSeek.*
 
+## How it works
+
+![How a job flows through Claude and the DeepSeek workers](docs/flowchart.svg)
+
+Claude splits the job and hands pieces to four kinds of DeepSeek worker:
+
+- **Web searchers** look things up online.
+- **Readers** read, research, review and analyse.
+- **Coders** write code, each in its own copy of your project.
+- **Leads** take a big job and run a small team of their own.
+
+Everything comes back to Claude, which checks it, is the only one that changes your files, and then
+answers you. For an interactive version with a slider for the delegation dial, download
+[`docs/flowchart.html`](docs/flowchart.html) and open it in your browser.
+
 ## Using it
 
 Just ask Claude in plain words, in any project:
@@ -69,6 +84,7 @@ Just ask Claude in plain words, in any project:
 - *"Use DeepSeek workers to find every place this project reads its settings file, and summarise them."*
 - *"Have DeepSeek research how other mods handle save files while you work on the menu."*
 - *"Get a DeepSeek worker to review the change you just made."*
+- *"Have a DeepSeek web searcher find the latest version of this library and what changed."*
 
 Or type `/deepseek-agents` to switch it on for the session.
 
@@ -86,6 +102,16 @@ less reliable, so Claude spends its time checking instead.
 | **4** | **Claude manages** | Claude plans, writes the instructions, checks and fits the pieces together. DeepSeek does most of the exploring and coding. *A good choice for bigger projects.* |
 | **5** | Everything | Claude only manages: every task, however small, goes to DeepSeek unless it needs you or this conversation. |
 
+How often each worker is used, roughly:
+
+| Level | Web searcher | Reader | Coder | Lead |
+|:---:|---|---|---|---|
+| 1 | only if you ask | only if you ask | only if you ask | only if you ask |
+| 2 | likely | likely | never | rare |
+| 3 | likely | very likely | sometimes | rare |
+| 4 | very likely | very likely | very likely | for big jobs |
+| 5 | almost always | almost always | almost always | often |
+
 **What never changes, at any level:** Claude talks to you, makes the design decisions, puts the pieces
 together, handles anything security-sensitive, and **checks every piece of DeepSeek work before using it**.
 
@@ -101,6 +127,8 @@ together, handles anything security-sensitive, and **checks every piece of DeepS
 - **Your DeepSeek key stays on your computer**, saved for your Windows account only.
 - **Workers can't change files they weren't given.** Coding tasks happen in a separate copy of your
   project, and Claude reviews the changes before bringing them in.
+- **Anything from the web is treated as unverified.** Web searchers can't see your project at all, and
+  a worker that has read the web can only change a separate copy, which Claude checks first.
 - **If a job needs a program you don't have**, Claude stops and asks you to install it rather than
   working around it.
 

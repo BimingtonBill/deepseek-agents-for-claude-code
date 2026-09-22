@@ -13,7 +13,7 @@ forgotten, and it borrows its field names from the two standards for this: OpenT
 
 | Thing | Format | Example | Rule |
 |---|---|---|---|
-| **Kind** | one word | `research`, `impl`, `review`, `analysis`, `critic`, `advisor`, `digest`, `lead`, `selftest`, `probe` | Says what sort of work it is. See the table below. |
+| **Kind** | one word | `research`, `websearch`, `impl`, `review`, `analysis`, `critic`, `advisor`, `digest`, `lead`, `selftest`, `probe` | Says what sort of work it is. See the table below. |
 | **Brief / task id** | `<kind>-<nnn>-<slug>.md` | `research-083-console-camera.md` | New briefs start with their kind. Take the number from the filesystem (`Glob`) right before writing. |
 | **Run id** | `<task id>.<attempt>` | `research-083-console-camera.2` | `.1` is the first run of that brief and a fresh rerun is the next number. A `-Resume` continues the run it resumes: same run id, one more in its `resumes` count. There are no more `t81b` labels; `resume-<hex>` appears only when resuming a session the manifest has no record of. |
 | **Title** | one sentence | "Why the console camera re-centres behind the moving character" | Taken from the first line under `# Goal` unless `-Title` is given. Written for an outsider. |
@@ -37,6 +37,7 @@ Legacy names still work: the launcher and `tools/ds_manifest.py` map `t##` to re
 | critic | judges screenshots or output against a reference | read |
 | advisor | read-only consultant on one question (the advisor-loop skill, `skill/advisor-loop/SKILL.md`) | read |
 | digest | merges and verifies several other runs' output | read |
+| websearch | searches and reads the web; no project files at all (`docs/design/websearch-injection.md`) | web only |
 | lead | a DeepSeek lead that splits a job and runs its own workers (`hierarchy.md`) | read + spawn |
 | selftest | checks the worker harness itself | edit (scratch) |
 | probe | an experiment on the harness (this project) | any |

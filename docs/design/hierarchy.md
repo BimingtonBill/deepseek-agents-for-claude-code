@@ -118,3 +118,36 @@ finished. The first run exposed two bugs, both fixed:
   minutes).
 
 In `lead-007` both workers sent and received (`research-last-word.1`: `ammag`; `research-even-sum.1`: `72`).
+
+## Leads can start coders (2026-09-22)
+
+A lead's `spawn_workers` used to run only read-only workers in the lead's own folder. Now `impl-*` briefs
+run as coders through `tools/ds_impl.ps1`, the same path Claude's coders take: each gets its own git
+worktree under `local/impl/<name>`, a scope check against its `Owned files:` line, and its `Acceptance:`
+commands. The lead gets back the scope and test results and reads the changed files to review them. It
+cannot integrate: the worktrees wait for Claude, so every change still reaches the real files through
+Claude's review. Coders are read-write only inside their worktree, so a read-only lead may start them too.
+At most 3 per call, because each Rust worktree seeds its own `target/`.
+
+**Stricter rules for a DeepSeek-written brief.** ds_impl runs acceptance commands itself, outside the
+workers' permission system, so when `DS_RUN_ID` is set (a DeepSeek run started it):
+
+- acceptance must start with a known test command (`cargo test`, `python -m unittest`, `npm test`,
+  `go test`, `dotnet test`, ...; the project's `"leadAcceptance"` replaces the list) and contain no
+  command separators, pipes, redirects, backticks, `$` or newlines;
+- owned files may not match the project's `denyEdit`, AGENTS.md, CLAUDE.md or `.deepseek-agents.json`,
+  since owning a file lifts its protection in the worktree;
+- for everyone, owned files must be inside the project (no rooted paths, no `..`, not `.git`), since
+  `-Integrate` copies them into it.
+
+This limits the command a lead can name, not what the tests do: acceptance runs code the coder wrote,
+exactly as it does for coders Claude starts.
+
+**Evidence** (scratch repo `coder-probe`, a two-function Python library):
+
+| Check | Result |
+|---|---|
+| ds_impl dry runs as a lead's coder | `python -m unittest ...` accepted; `python -c ...`, `cargo test; del x`, `../outside.py` and `AGENTS.md` (in denyEdit) each refused with a reason. As Claude's coder, `python -c` is still accepted and `..` is refused. |
+| `lead-coders-probe.1` (read-only lead) | Started `impl-001-slugify.1` and `impl-002-wrap.1` in one call. They ran in parallel (65 s and 64 s), each in its own worktree, scope ok, acceptance `OK` (34 and 23 tests). The lead read both diffs, hand-checked edge cases, and gave "merge as is" for both, listing the spec choices it had fixed in the briefs. Main checkout untouched. |
+| Records | Both coders: kind `impl`, parent `lead-coders-probe.1`, lineage `claude/lead-coders-probe.1/impl-...`, depth 2; two `pilot.csv` rows, `pending-review`. |
+| Claude integrates | `-Integrate` both. The combined suite ran 57 tests, OK: the check neither coder could run, since each saw only its own tests. |

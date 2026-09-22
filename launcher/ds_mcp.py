@@ -22,7 +22,10 @@ ENABLED = {t.strip() for t in os.environ.get('DS_MCP_TOOLS', '').split(',') if t
 BRIEF_DIR = Path(os.environ.get('DS_BRIEF_DIR', '.'))
 SPAWN = os.environ.get('DS_SPAWN_SCRIPT', '')
 WORK_DIR = os.environ.get('DS_WORK_DIR', os.getcwd())
-KINDS = ('research', 'impl', 'review', 'analysis', 'critic', 'digest')
+# impl-* briefs run as coders through tools/ds_impl.ps1, each in its own git worktree.
+IMPL = os.environ.get('DS_IMPL_SCRIPT', '')
+MAX_CODERS = 3
+KINDS = ('research', 'websearch', 'impl', 'review', 'analysis', 'critic', 'digest')
 
 TOOLS = []
 if 'wait' in ENABLED:
@@ -49,8 +52,11 @@ if 'spawn' in ENABLED:
         'name': 'spawn_workers',
         'description': ('Launch up to 6 DeepSeek workers in parallel from briefs saved with write_brief, wait '
                         'for all of them, and return each report under its run id. Workers run read-only in '
-                        'your working directory. They can message each other unless you set crosstalk false; '
-                        'tell each one the others\' run ids in its brief. This can take many minutes.'),
+                        'your working directory. impl-* briefs run as coders instead (at most 3 per call): each '
+                        'in its own git worktree under local/impl/<name>, followed by a scope check and its '
+                        'Acceptance commands; nothing reaches the real files until Claude integrates it. '
+                        'Workers can message each other unless you set crosstalk false; tell each one the '
+                        'others\' run ids in its brief. This can take many minutes.'),
         'inputSchema': {'type': 'object', 'properties': {
             'briefs': {'type': 'array', 'items': {'type': 'string'}, 'description': 'brief names given to write_brief'},
             'crosstalk': {'type': 'boolean', 'description': 'let the workers message each other; default true'},
@@ -93,6 +99,13 @@ def call(name, args):
         content = str(args.get('content') or '')
         if len(content) < 80 or '# Goal' not in content:
             return text('the brief needs at least a # Goal section and enough detail to stand alone', True)
+        if brief.startswith('impl-'):
+            if not IMPL:
+                return text('coders are not available here (tools/ds_impl.ps1 was not found)', True)
+            if not re.search(r'(?m)^\s*Owned files:\s*\S', content) or not re.search(r'(?m)^\s*Acceptance:\s*\S', content):
+                return text('an impl brief needs a line "Owned files: path/a, path/b" (the files the coder may '
+                            'change, relative to the project root) and a line "Acceptance: <command>" (a test '
+                            'command such as cargo test -p crate or python -m unittest discover -s tests)', True)
         BRIEF_DIR.mkdir(parents=True, exist_ok=True)
         path = BRIEF_DIR / (brief + '.md')
         path.write_text(content, encoding='utf-8')
@@ -104,16 +117,43 @@ def call(name, args):
         missing = [n for n in names if not (BRIEF_DIR / (n + '.md')).exists()]
         if missing:
             return text('not saved with write_brief yet: %s' % ', '.join(missing), True)
-        cmd = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', SPAWN, '-Dir', WORK_DIR,
-               '-Briefs', ','.join(str(BRIEF_DIR / (n + '.md')) for n in names),
-               '-Effort', args.get('effort') or 'high', '-MaxTurns', str(args.get('max_turns') or 80)]
-        if args.get('crosstalk') is False:
-            cmd.append('-NoCrosstalk')
-        done = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
-        out = (done.stdout or '') + (('\n' + done.stderr) if done.stderr.strip() else '')
-        # The children's first stdout line is Claude Code's model notice; it is noise here.
-        out = '\n'.join(l for l in out.splitlines() if not l.startswith('[claude-code:unrecognized_model]'))
-        return text(out.strip() or '(no output)', done.returncode not in (0, 1))
+        coders = [n for n in names if n.startswith('impl-')]
+        readers = [n for n in names if n not in coders]
+        if len(coders) > MAX_CODERS:
+            return text('at most %d coders per call: each gets its own checkout and build' % MAX_CODERS, True)
+        if coders and not IMPL:
+            return text('coders are not available here (tools/ds_impl.ps1 was not found)', True)
+        jobs = []
+        if readers:
+            cmd = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', SPAWN, '-Dir', WORK_DIR,
+                   '-Briefs', ','.join(str(BRIEF_DIR / (n + '.md')) for n in readers),
+                   '-Effort', args.get('effort') or 'high', '-MaxTurns', str(args.get('max_turns') or 80)]
+            if args.get('crosstalk') is False:
+                cmd.append('-NoCrosstalk')
+            jobs.append(('readers', subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                                     text=True, encoding='utf-8', errors='replace')))
+        for n in coders:
+            # Stagger starts so two runs never read the manifest counter at the same instant.
+            if jobs:
+                time.sleep(1)
+            cmd = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', IMPL,
+                   '-Brief', str(BRIEF_DIR / (n + '.md')), '-Effort', args.get('effort') or 'high']
+            if args.get('max_turns'):
+                cmd += ['-MaxTurns', str(args['max_turns'])]
+            jobs.append((n, subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                             encoding='utf-8', errors='replace', cwd=WORK_DIR,
+                                             env=dict(os.environ, DS_PROJECT=WORK_DIR))))
+        parts, failed = [], True
+        for label, proc in jobs:
+            stdout, stderr = proc.communicate()
+            out = (stdout or '') + (('\n' + stderr) if (stderr or '').strip() else '')
+            # The children's first stdout line is Claude Code's model notice; it is noise here.
+            out = '\n'.join(l for l in out.splitlines() if not l.startswith('[claude-code:unrecognized_model]')).strip()
+            if label != 'readers':
+                out = ('=== coder %s (worktree local/impl/%s; Claude reviews and integrates it) ===\n' % (label, label)) + (out or '(no output)')
+            parts.append(out)
+            failed = failed and proc.returncode not in (0, 1)
+        return text('\n\n'.join(p for p in parts if p) or '(no output)', failed)
     return text('unknown tool %s' % name, True)
 
 

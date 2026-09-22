@@ -1,6 +1,6 @@
 <!--
 File name: <kind>-<nnn>-<slug>.md, e.g. research-083-console-camera.md.
-  kind: research | impl | review | analysis | critic | advisor | digest | lead | selftest
+  kind: research | websearch | impl | review | analysis | critic | advisor | digest | lead | selftest
   nnn:  next free number in the project's brief folder; check the filesystem right before writing.
 The run id will be <file name>.<attempt>, e.g. research-083-console-camera.1.
 The first line under "# Goal" becomes the run's title in the manifest: write it for an outsider.

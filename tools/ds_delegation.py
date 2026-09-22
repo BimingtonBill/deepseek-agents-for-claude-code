@@ -40,6 +40,14 @@ ALWAYS = ('At every level Claude keeps: talking to the user, design and architec
           'them (the next brief, integration plumbing, the previous review, its own tests and builds), '
           'and starts its own long builds and conversions in the background too; a worker run is not '
           'a wait.')
+# From level 2 up, web lookups are a standard delegated step rather than Claude's own searching: a
+# websearch worker has no file access, so a bad page can't reach the project (docs/design/websearch-injection.md).
+WEB_LOOKUP_FROM = 2
+WEB_LOOKUP = ('Web lookups: when a task needs information from outside the project (library or tool versions, '
+              'changelogs, API documentation, an error message, how others solved something), send a DeepSeek '
+              'websearch worker (-Kind websearch) instead of searching yourself; only a single quick search you '
+              'need this minute is yours. Start it as soon as the question comes up and keep working while it '
+              'runs. Give it everything it needs in the brief, nothing private, and check the claims you act on.')
 # Shown in every generated AGENTS.md block, so every session sees it before it plans.
 MISSING_TOOLS = ('Missing tools: before starting a job, check that the tools it needs are installed. If a compiler, '
                  'runtime or package the best approach needs is missing, stop and ask the user to install it (say '
@@ -130,7 +138,8 @@ def effective(project, env=None, global_config=None):
 
 def describe(level):
     name, rule = LEVELS[level]
-    return 'Delegation level %d of 5 - %s. %s' % (level, name, rule)
+    web = (' ' + WEB_LOOKUP) if level >= WEB_LOOKUP_FROM else ''
+    return 'Delegation level %d of 5 - %s. %s%s' % (level, name, rule, web)
 
 
 def set_level(path, level):
@@ -152,6 +161,7 @@ def agents_block(level):
         '',
         LEVELS[level][1],
         '',
+    ] + ([WEB_LOOKUP, ''] if level >= WEB_LOOKUP_FROM else []) + [
         ALWAYS,
         '',
         MISSING_TOOLS,

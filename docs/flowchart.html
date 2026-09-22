@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSeek agents: how it works</title>
+<style>
+:root{--bg:#FFFFFF;--text:#2C2C2A;--muted:#5F5E5A;--faint:#888780;--line:#5F5E5A;--dash:#888780;
+--gray-f:#F1EFE8;--gray-s:#5F5E5A;--gray-t:#444441;--gray-u:#5F5E5A;
+--purple-f:#EEEDFE;--purple-s:#534AB7;--purple-t:#3C3489;--purple-u:#534AB7;
+--teal-f:#E1F5EE;--teal-s:#0F6E56;--teal-t:#085041;--teal-u:#0F6E56;
+--coral-f:#FAECE7;--coral-s:#993C1D;--coral-t:#712B13;--coral-u:#993C1D}
+@media (prefers-color-scheme: dark){:root{--bg:#1F1E1C;--text:#F1EFE8;--muted:#B4B2A9;--faint:#888780;--line:#B4B2A9;--dash:#888780;
+--gray-f:#444441;--gray-s:#B4B2A9;--gray-t:#F1EFE8;--gray-u:#D3D1C7;
+--purple-f:#3C3489;--purple-s:#AFA9EC;--purple-t:#EEEDFE;--purple-u:#CECBF6;
+--teal-f:#085041;--teal-s:#5DCAA5;--teal-t:#E1F5EE;--teal-u:#9FE1CB;
+--coral-f:#712B13;--coral-s:#F0997B;--coral-t:#FAECE7;--coral-u:#F5C4B3}}
+body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+main{max-width:720px;margin:0 auto;padding:24px 16px 40px}
+h1{font-size:22px;font-weight:500;margin:0 0 4px}
+.ctl{display:flex;align-items:center;gap:12px;padding:12px 0 4px;flex-wrap:wrap}
+.ctl input{flex:1;min-width:160px}
+.lvl{font-size:16px;font-weight:500;min-width:210px}
+.desc{font-size:14px;color:var(--muted);margin:0 0 8px;min-height:42px;line-height:1.5}
+.note{font-size:12px;color:var(--faint);line-height:1.6}
+svg{width:100%;height:auto;display:block}
+.gray{fill:var(--gray-f);stroke:var(--gray-s)}.gray-t{fill:var(--gray-t)}.gray-u{fill:var(--gray-u)}
+.purple{fill:var(--purple-f);stroke:var(--purple-s)}.purple-t{fill:var(--purple-t)}.purple-u{fill:var(--purple-u)}
+.teal{fill:var(--teal-f);stroke:var(--teal-s)}.teal-t{fill:var(--teal-t)}.teal-u{fill:var(--teal-u)}
+.coral{fill:var(--coral-f);stroke:var(--coral-s)}.coral-t{fill:var(--coral-t)}.coral-u{fill:var(--coral-u)}
+.t{font-size:14px;font-weight:500}.s{font-size:12px}
+.arr{stroke:var(--line);stroke-width:1.5;fill:none}
+.fade{transition:opacity .25s}
+</style>
+</head>
+<body>
+<main>
+<h1>How DeepSeek agents for Claude Code works</h1>
+<div class="ctl"><label for="lv" style="font-size:14px;color:var(--muted)">Delegation level</label><input id="lv" type="range" min="1" max="5" step="1" value="3" aria-describedby="desc"><span class="lvl" id="lvname"></span></div>
+<p class="desc" id="desc"></p>
+<svg viewBox="0 0 680 820" role="img" aria-labelledby="ft fd"><title id="ft">Delegation flowchart</title><desc id="fd">You ask, Claude plans, work goes to a web searcher, reader, coder or DeepSeek lead. The lead has its own team of reader, web and coder workers. Bars show how likely each is at the chosen level. Everything comes back to Claude, which checks, merges and answers.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect class="gray" x="260" y="40" width="160" height="52" rx="4"/><text class="t gray-t" x="340" y="61" text-anchor="middle">You ask</text><text class="s gray-u" x="340" y="80" text-anchor="middle">in plain words</text>
+<line x1="340" y1="92" x2="340" y2="126" class="arr" marker-end="url(#arrow)"/>
+<rect class="purple" x="190" y="130" width="300" height="56" rx="4"/><text class="t purple-t" x="340" y="153" text-anchor="middle">Claude plans</text><text class="s purple-u" x="340" y="173" text-anchor="middle" id="claudeSub"></text>
+<path id="a-web" class="arr fade" d="M340 186 L340 212 L92 212 L92 236" marker-end="url(#arrow)"/>
+<path id="a-reader" class="arr fade" d="M217 212 L217 236" marker-end="url(#arrow)"/>
+<path id="a-coder" class="arr fade" d="M342 212 L342 236" marker-end="url(#arrow)"/>
+<path id="a-lead" class="arr fade" d="M340 212 L535 212 L535 236" marker-end="url(#arrow)"/>
+<g id="g-web" class="fade"><rect class="teal" x="40" y="240" width="105" height="104" rx="4"/><text class="t teal-t" x="92" y="264" text-anchor="middle">Web searcher</text><text class="s teal-u" x="92" y="283" text-anchor="middle">outside info</text><rect x="50" y="298" width="85" height="6" rx="3" style="fill:#1D9E75;fill-opacity:.25"/><rect id="b-web" x="50" y="298" width="0" height="6" rx="3" style="fill:#1D9E75"/><text id="t-web" class="s teal-u" x="92" y="326" text-anchor="middle"></text></g>
+<g id="g-reader" class="fade"><rect class="teal" x="165" y="240" width="105" height="104" rx="4"/><text class="t teal-t" x="217" y="264" text-anchor="middle">Reader</text><text class="s teal-u" x="217" y="283" text-anchor="middle">read, review</text><rect x="175" y="298" width="85" height="6" rx="3" style="fill:#1D9E75;fill-opacity:.25"/><rect id="b-reader" x="175" y="298" width="0" height="6" rx="3" style="fill:#1D9E75"/><text id="t-reader" class="s teal-u" x="217" y="326" text-anchor="middle"></text></g>
+<g id="g-coder" class="fade"><rect class="coral" x="290" y="240" width="105" height="104" rx="4"/><text class="t coral-t" x="342" y="264" text-anchor="middle">Coder</text><text class="s coral-u" x="342" y="283" text-anchor="middle">in its own copy</text><rect x="300" y="298" width="85" height="6" rx="3" style="fill:#D85A30;fill-opacity:.25"/><rect id="b-coder" x="300" y="298" width="0" height="6" rx="3" style="fill:#D85A30"/><text id="t-coder" class="s coral-u" x="342" y="326" text-anchor="middle"></text></g>
+<g id="g-lead" class="fade"><rect class="teal" x="430" y="240" width="210" height="104" rx="4"/><text class="t teal-t" x="535" y="264" text-anchor="middle">DeepSeek lead</text><text class="s teal-u" x="535" y="283" text-anchor="middle">big job, splits it up</text><rect x="455" y="298" width="160" height="6" rx="3" style="fill:#1D9E75;fill-opacity:.25"/><rect id="b-lead" x="455" y="298" width="0" height="6" rx="3" style="fill:#1D9E75"/><text id="t-lead" class="s teal-u" x="535" y="326" text-anchor="middle"></text></g>
+<g id="g-team" class="fade">
+<line x1="535" y1="344" x2="535" y2="372" class="arr" marker-end="url(#arrow)"/>
+<rect x="430" y="376" width="210" height="112" rx="4" fill="none" stroke="var(--dash)" stroke-dasharray="4 3"/>
+<text class="s gray-u" x="535" y="394" text-anchor="middle">Lead's team (reports to the lead)</text>
+<g id="s-reader" class="fade"><rect class="teal" x="436" y="404" width="62" height="76" rx="4"/><text class="t teal-t" x="467" y="426" text-anchor="middle">Reader</text><rect x="443" y="438" width="48" height="5" rx="2.5" style="fill:#1D9E75;fill-opacity:.25"/><rect id="sb-reader" x="443" y="438" width="0" height="5" rx="2.5" style="fill:#1D9E75"/><text id="st-reader" class="s teal-u" x="467" y="466" text-anchor="middle"></text></g>
+<g id="s-web" class="fade"><rect class="teal" x="504" y="404" width="62" height="76" rx="4"/><text class="t teal-t" x="535" y="426" text-anchor="middle">Web</text><rect x="511" y="438" width="48" height="5" rx="2.5" style="fill:#1D9E75;fill-opacity:.25"/><rect id="sb-web" x="511" y="438" width="0" height="5" rx="2.5" style="fill:#1D9E75"/><text id="st-web" class="s teal-u" x="535" y="466" text-anchor="middle"></text></g>
+<g id="s-coder" class="fade"><rect class="coral" x="572" y="404" width="62" height="76" rx="4"/><text class="t coral-t" x="603" y="426" text-anchor="middle">Coder</text><rect x="579" y="438" width="48" height="5" rx="2.5" style="fill:#D85A30;fill-opacity:.25"/><rect id="sb-coder" x="579" y="438" width="0" height="5" rx="2.5" style="fill:#D85A30"/><text id="st-coder" class="s coral-u" x="603" y="466" text-anchor="middle"></text></g>
+<line x1="535" y1="488" x2="535" y2="520" class="arr" marker-end="url(#arrow)"/>
+</g>
+<line id="d-web" class="arr fade" x1="92" y1="344" x2="92" y2="520" marker-end="url(#arrow)"/>
+<line id="d-reader" class="arr fade" x1="217" y1="344" x2="217" y2="520" marker-end="url(#arrow)"/>
+<line id="d-coder" class="arr fade" x1="342" y1="344" x2="342" y2="520" marker-end="url(#arrow)"/>
+<rect class="purple" x="40" y="524" width="600" height="56" rx="4"/><text class="t purple-t" x="340" y="547" text-anchor="middle">Claude checks everything</text><text class="s purple-u" x="340" y="567" text-anchor="middle">reports, code changes, web claims</text>
+<line x1="340" y1="580" x2="340" y2="610" class="arr" marker-end="url(#arrow)"/>
+<rect class="purple" x="190" y="614" width="300" height="56" rx="4"/><text class="t purple-t" x="340" y="637" text-anchor="middle">Claude merges into your files</text><text class="s purple-u" x="340" y="657" text-anchor="middle">then runs all the tests</text>
+<line x1="340" y1="670" x2="340" y2="702" class="arr" marker-end="url(#arrow)"/>
+<rect class="gray" x="260" y="706" width="160" height="52" rx="4"/><text class="t gray-t" x="340" y="727" text-anchor="middle">Answer to you</text><text class="s gray-u" x="340" y="746" text-anchor="middle">with what changed</text>
+<rect class="purple" x="40" y="784" width="14" height="14" rx="2"/><text class="s gray-t" x="62" y="796">Claude</text>
+<rect class="teal" x="130" y="784" width="14" height="14" rx="2"/><text class="s gray-t" x="152" y="796">DeepSeek, can't touch your files</text>
+<rect class="coral" x="390" y="784" width="14" height="14" rx="2"/><text class="s gray-t" x="412" y="796">DeepSeek, edits only its own copy</text>
+</svg>
+<p class="note">Bars are a rough guide read from each level's rules, not measured odds. The small squares show how likely each worker is once a lead is running. A lead can start a web worker only if it can't edit your files itself, and its team can't start teams of their own. Whatever the level, Claude checks everything and is the only one that changes your files.</p>
+</main>
+<script>
+const L={
+1:{n:'1 · Only when asked',d:'Claude does the work itself and uses DeepSeek only when you ask for it.',c:'does the work itself',
+ r:{web:[4,'only if asked'],reader:[4,'only if asked'],coder:[4,'only if asked'],lead:[3,'only if you ask']},
+ s:{reader:[4,'if asked'],web:[4,'if asked'],coder:[4,'if asked']}},
+2:{n:'2 · Research and review',d:'Research, big reading jobs, web lookups and reviews go to DeepSeek. Claude writes all the code.',c:'hands off research and reviews',
+ r:{web:[70,'likely'],reader:[70,'likely'],coder:[0,'never'],lead:[5,'rare']},
+ s:{reader:[70,'likely'],web:[50,'maybe'],coder:[0,'never']}},
+3:{n:'3 · Balanced (default)',d:'As 2, plus small self-contained pieces of code, several at once, each checked by a reviewer.',c:'hands off research and small code',
+ r:{web:[75,'likely'],reader:[85,'very likely'],coder:[45,'sometimes'],lead:[15,'rare']},
+ s:{reader:[80,'often'],web:[55,'maybe'],coder:[30,'maybe']}},
+4:{n:'4 · Claude manages',d:'Claude plans, writes the instructions, checks and fits the pieces together. DeepSeek does most of the exploring and coding, with leads for jobs that split up.',c:'plans, checks, fits together',
+ r:{web:[85,'very likely'],reader:[90,'very likely'],coder:[85,'very likely'],lead:[45,'for big jobs']},
+ s:{reader:[85,'often'],web:[60,'likely'],coder:[75,'likely']}},
+5:{n:'5 · Everything',d:'Claude only manages: every task, even small edits and lookups, goes to DeepSeek unless it needs you or this conversation.',c:'only manages the workers',
+ r:{web:[95,'almost always'],reader:[95,'almost always'],coder:[95,'almost always'],lead:[65,'often']},
+ s:{reader:[90,'usually'],web:[70,'likely'],coder:[90,'usually']}}};
+const W={web:85,reader:85,coder:85,lead:160};
+const s=document.getElementById('lv');
+const op=p=>p<10?0.3:0.45+0.55*p/100;
+function draw(){const v=L[s.value];
+document.getElementById('lvname').textContent=v.n;document.getElementById('desc').textContent=v.d;document.getElementById('claudeSub').textContent=v.c;
+for(const k of ['web','reader','coder','lead']){const[p,t]=v.r[k];const o=op(p);
+ document.getElementById('b-'+k).setAttribute('width',W[k]*p/100);document.getElementById('t-'+k).textContent=t;
+ document.getElementById('g-'+k).style.opacity=o;const a=document.getElementById('a-'+k);a.style.opacity=o;a.style.strokeDasharray=p<10?'4 4':'none';
+ if(k!=='lead')document.getElementById('d-'+k).style.opacity=o;}
+document.getElementById('g-team').style.opacity=op(v.r.lead[0]);
+for(const k of ['reader','web','coder']){const[p,t]=v.s[k];
+ document.getElementById('sb-'+k).setAttribute('width',48*p/100);document.getElementById('st-'+k).textContent=t;
+ document.getElementById('s-'+k).style.opacity=p<10?0.35:0.5+0.5*p/100;}}
+s.addEventListener('input',draw);draw();
+</script>
+</body>
+</html>
