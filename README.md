@@ -1,11 +1,5 @@
 # DeepSeek agents for Claude Code
 
-**Give Claude a team of cheap helpers.** Claude stays in charge and does the thinking that matters, while
-DeepSeek AI "workers" do the legwork in the background: reading through code, researching, writing
-first drafts of code, and checking each other's work.
-
-> An independent community project. It is not made or endorsed by Anthropic or DeepSeek.
-
 ## Install
 
 ### What you need first
@@ -52,30 +46,21 @@ When it's done, **close and reopen the Claude app.**
    window for your DeepSeek key.
 3. Close and reopen the Claude app.
 
-## What is this, in plain words?
+## What is this?
 
-[Claude Code](https://claude.com/claude-code) is Claude working directly on the files on your computer.
-It's great, but big jobs eat into your Claude usage limits, and Claude does one thing at a time.
-
-This add-on lets Claude act like a **manager**:
-
-- You ask Claude for something, as usual.
-- Claude breaks the job into pieces and hands some of them to **DeepSeek workers**: separate, much
-  cheaper AI helpers that run on your computer in the background.
-- While they work, Claude keeps working on its own part.
-- When a worker finishes, Claude **checks its work** before using it. Nothing a worker does goes in
-  without Claude looking at it.
+An add-on for [Claude Code](https://claude.com/claude-code) that gives Claude a team of cheap helpers.
+Claude stays in charge: it splits a job into pieces and hands some of them to DeepSeek AI "workers" that
+run in the background on your computer (reading code, researching, drafting code, checking each other's
+work). It keeps working on its own part meanwhile, and checks every worker's result before using it.
 
 You'll see the workers in Claude's **Background tasks** panel, with names like
 `DeepSeek research #004: find where the game loads save files`.
 
-## What does it cost?
+**Cost:** DeepSeek charges per use. A typical worker task costs a few cents and a big one up to about
+20 cents, so a $5 top-up goes a long way. Because the heavy reading and drafting happens on DeepSeek,
+your Claude plan (which you still need) lasts longer.
 
-- **DeepSeek charges per use, and it's cheap.** A typical worker task costs a few cents, and big ones
-  up to about 20 cents. Topping up $5 goes a long way.
-- **It saves your Claude usage.** The heavy reading and drafting happens on DeepSeek, so your Claude
-  plan lasts longer.
-- You still need your normal Claude plan that includes Claude Code.
+*An independent community project, not made or endorsed by Anthropic or DeepSeek.*
 
 ## Using it
 
