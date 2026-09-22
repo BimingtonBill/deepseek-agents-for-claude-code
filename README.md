@@ -129,6 +129,11 @@ together, handles anything security-sensitive, and **checks every piece of DeepS
   project, and Claude reviews the changes before bringing them in.
 - **Anything from the web is treated as unverified.** Web searchers can't see your project at all, and
   a worker that has read the web can only change a separate copy, which Claude checks first.
+- **It adds one small rule to Claude Code** (a "hook" in `~/.claude/settings.json`, backed up first). It only
+  reacts when Claude starts a DeepSeek lead: it makes sure the lead and each of its workers show up in the
+  Background tasks panel. It ignores everything else. To install without it, run
+  `powershell -ExecutionPolicy Bypass -File tools/install-skill.ps1 -NoHooks` from the unzipped folder. To
+  remove it later, delete the two entries that mention `ds_hook.py` from that file.
 - **If a job needs a program you don't have**, Claude stops and asks you to install it rather than
   working around it.
 

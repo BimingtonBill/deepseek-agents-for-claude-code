@@ -261,6 +261,25 @@ to leads through `write_brief`/`spawn_workers`.
 | `lead-edit-websearch.1` (edit lead in the main checkout) | spawn_workers refused the websearch child with the lead rule's message. The lead reported it and changed nothing but its brief. |
 | `websearch-002-recheck.1` | Rerun after fixing a variable clash that had put the first runs' record files in the project folder: records in `local/agents/runs/`, start folder empty. The first runs' files were moved back by hand; `lead-edit-websearch.1`'s record was overwritten by `lead-websearch-child.1`'s, and only its manifest.jsonl events and brief remain. |
 
+**How long a lookup takes, and the caps.** Eight runs so far:
+
+| Run | Time | Turns |
+|---|---|---|
+| `probe-websearch-tool.1` (low) | 13 s | 3 |
+| `websearch-004-limits-check.1` (max) | 20 s | 5 |
+| `websearch-002-recheck.1` (low) | 32 s | 5 |
+| `websearch-003-default-effort.1` (max) | 33 s | 9 |
+| `websearch-001-role-probe.1` (high) | 35 s | 8 |
+| `websearch-001-httpx-latest.1`, lead's child (high) | 90 s | 19 |
+| `websearch-001-httpx-latest.1`, natural-probe project (high) | 97 s | 18 |
+
+Effort barely matters: max took 33 s where high took 35 s on the same question. The number of sub-questions
+is what counts. The general limits (60 turns, 30 min, or a project's defaults such as 400/150) would let a
+stuck worker wander for half an hour, so a websearch run is capped at 30 turns and 10 minutes. Those are
+ceilings. Claude can raise them with an explicit `-MaxTurns`/`-TimeoutMinutes`; a lead's children always get
+the caps, since `ds-spawn.ps1` passes its own values. The worker is also told to stop once two independent
+sources agree. `websearch-004-limits-check.1` ran under the caps (max_turns 30) in 20 s.
+
 **Still open.** The rule can't see a claim that reaches an edit-capable run by another route. For example,
 Claude pastes a web worker's finding into an edit brief for a run in the main checkout. That hop is Claude's
 own review, which the skill now asks for explicitly ("Web research and edits").

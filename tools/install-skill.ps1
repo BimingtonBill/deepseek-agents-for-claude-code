@@ -12,13 +12,19 @@
 #   templates/brief*.md, *-schema.json    brief templates and the result schema ds_impl.ps1 falls back on
 # and the advisor-loop skill beside it. -Target installs into another folder instead of ~/.claude/skills
 # (for testing an install without touching the live one).
-param([switch]$DryRun, [string]$Target)
+#
+# It also registers ds_hook.py in ~/.claude/settings.json (backed up first; other settings are kept) as a
+# PreToolUse and PostToolUse hook on Bash and PowerShell, so every DeepSeek lead runs in the background with a
+# watcher for its workers. -NoHooks skips that; -Target never touches the user's settings.
+param([switch]$DryRun, [string]$Target, [switch]$NoHooks)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+# PowerShell names are case-insensitive: $target below overwrites -Target, so note now whether one was given.
+$customTarget = [bool]$Target
 $skills = if ($Target) { $Target } else { Join-Path $HOME '.claude\skills' }
 $target = Join-Path $skills 'deepseek-agents'
 
-$files = [ordered]@{ 'SKILL.md' = 'skill\deepseek-agents\SKILL.md' }
+$files = [ordered]@{ 'SKILL.md' = 'skill\deepseek-agents\SKILL.md'; 'ds_hook.py' = 'skill\deepseek-agents\ds_hook.py' }
 foreach ($name in 'ds-agent.ps1', 'ds-spawn.ps1', 'ds_mcp.py', 'ds-which.ps1', 'ds-watch.ps1') {
     $files[$name] = "launcher\$name"
 }
@@ -52,3 +58,10 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $advisor.dst) | Ou
 if (Test-Path $advisor.dst) { Copy-Item $advisor.dst (Join-Path $backups "advisor-loop.SKILL.bak-$(Get-Date -Format yyyyMMdd-HHmmss).md") }
 Copy-Item -LiteralPath (Join-Path $root $advisor.src) -Destination $advisor.dst -Force
 "installed $($files.Count) files into $target, and the advisor-loop skill"
+
+# --- The lead hook in the user's Claude Code settings ---
+if (-not $NoHooks -and -not $customTarget) {
+    $python = @('python', 'py') | ForEach-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+    if (-not $python) { 'hook not registered: Python was not found'; exit 0 }
+    & $python.Name (Join-Path $target 'ds_hook.py') --install
+}
