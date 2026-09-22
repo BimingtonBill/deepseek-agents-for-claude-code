@@ -6,32 +6,9 @@ first drafts of code, and checking each other's work.
 
 > An independent community project. It is not made or endorsed by Anthropic or DeepSeek.
 
-## What is this, in plain words?
+## Install
 
-[Claude Code](https://claude.com/claude-code) is Claude working directly on the files on your computer.
-It's great, but big jobs eat into your Claude usage limits, and Claude does one thing at a time.
-
-This add-on lets Claude act like a **manager**:
-
-- You ask Claude for something, as usual.
-- Claude breaks the job into pieces and hands some of them to **DeepSeek workers**: separate, much
-  cheaper AI helpers that run on your computer in the background.
-- While they work, Claude keeps working on its own part.
-- When a worker finishes, Claude **checks its work** before using it. Nothing a worker does goes in
-  without Claude looking at it.
-
-You'll see the workers in Claude's **Background tasks** panel, with names like
-`DeepSeek research #004: find where the game loads save files`.
-
-## What does it cost?
-
-- **DeepSeek charges per use, and it's cheap.** A typical worker task costs a few cents, and big ones
-  up to about 20 cents. Topping up $5 goes a long way.
-- **It saves your Claude usage.** The heavy reading and drafting happens on DeepSeek, so your Claude
-  plan lasts longer.
-- You still need your normal Claude plan that includes Claude Code.
-
-## What you need
+### What you need first
 
 - A **Windows** computer.
 - The **Claude desktop app** ([download](https://claude.ai/download)) with a plan that includes Claude
@@ -41,7 +18,7 @@ You'll see the workers in Claude's **Background tasks** panel, with names like
   once during setup.
 - **Python 3.** If you don't have it, setup tells you how to get it.
 
-## Install it: the easy way
+### The easy way: paste this into Claude
 
 Open the Claude desktop app, go to the **Code** tab, start a session, and paste this in:
 
@@ -67,13 +44,38 @@ When it's done, **close and reopen the Claude app.**
 > typed into a Claude chat is saved in the chat. The separate window keeps the key out of it, and stores
 > it privately on your computer.
 
-## Install it: by hand
+### Or install it by hand
 
 1. Download `deepseek-agents-for-claude-code.zip` from the
    [latest release](https://github.com/BimingtonBill/deepseek-agents-for-claude-code/releases/latest) and unzip it.
 2. Double-click **`install.cmd`** in the unzipped folder. It installs everything and, if needed, opens the
    window for your DeepSeek key.
 3. Close and reopen the Claude app.
+
+## What is this, in plain words?
+
+[Claude Code](https://claude.com/claude-code) is Claude working directly on the files on your computer.
+It's great, but big jobs eat into your Claude usage limits, and Claude does one thing at a time.
+
+This add-on lets Claude act like a **manager**:
+
+- You ask Claude for something, as usual.
+- Claude breaks the job into pieces and hands some of them to **DeepSeek workers**: separate, much
+  cheaper AI helpers that run on your computer in the background.
+- While they work, Claude keeps working on its own part.
+- When a worker finishes, Claude **checks its work** before using it. Nothing a worker does goes in
+  without Claude looking at it.
+
+You'll see the workers in Claude's **Background tasks** panel, with names like
+`DeepSeek research #004: find where the game loads save files`.
+
+## What does it cost?
+
+- **DeepSeek charges per use, and it's cheap.** A typical worker task costs a few cents, and big ones
+  up to about 20 cents. Topping up $5 goes a long way.
+- **It saves your Claude usage.** The heavy reading and drafting happens on DeepSeek, so your Claude
+  plan lasts longer.
+- You still need your normal Claude plan that includes Claude Code.
 
 ## Using it
 
