@@ -1,0 +1,84 @@
+<#
+.SYNOPSIS
+  Runs several DeepSeek workers in parallel, waits for all of them, and prints each report.
+
+.DESCRIPTION
+  This is how a DeepSeek lead (a worker started with ds-agent.ps1 -CanSpawn) launches its own
+  workers. Claude can use it too. Each brief becomes one ds-agent.ps1 run; lineage flows through
+  the DS_* variables the parent's launcher set, so every child's manifest names its parent and
+  the depth limit is enforced by ds-agent.ps1 itself.
+
+  Children are read-only unless -Mode edit is passed, and a lead that is itself read-only cannot
+  give its children edit rights (DS_PARENT_MODE).
+
+.EXAMPLE
+  powershell -NoProfile -ExecutionPolicy Bypass -File ds-spawn.ps1 -Dir C:\code\app -Briefs a.md,b.md
+#>
+[CmdletBinding(PositionalBinding = $false)]
+param(
+    [Parameter(Mandatory)][string]$Dir,
+    # Brief files, comma-separated. Each file name (without .md) becomes the child's label.
+    [Parameter(Mandatory)][string[]]$Briefs,
+    [ValidateSet('read', 'edit')][string]$Mode = 'read',
+    # Children can message each other by default, like every worker; -NoCrosstalk turns it off.
+    # -Crosstalk is still accepted from older callers.
+    [switch]$Crosstalk,
+    [switch]$NoCrosstalk,
+    # DeepSeek's three thinking levels.
+    [ValidateSet('low', 'high', 'max')][string]$Effort = 'high',
+    [int]$MaxTurns = 80,
+    [int]$TimeoutMinutes = 25
+)
+$ErrorActionPreference = 'Stop'
+$utf8 = New-Object System.Text.UTF8Encoding $false
+try { [Console]::OutputEncoding = $utf8 } catch { }
+$launcher = Join-Path $PSScriptRoot 'ds-agent.ps1'
+
+$Briefs = @($Briefs -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if (-not $Briefs) { [Console]::Error.WriteLine('[ds-spawn] no briefs given'); exit 2 }
+if ($Briefs.Count -gt 6) { [Console]::Error.WriteLine('[ds-spawn] at most 6 workers per call; split the work or do more of it yourself'); exit 2 }
+if ($Mode -eq 'edit' -and $env:DS_PARENT_MODE -eq 'read') {
+    [Console]::Error.WriteLine('[ds-spawn] a read-only lead cannot start editing workers'); exit 2
+}
+foreach ($b in $Briefs) { if (-not (Test-Path -LiteralPath $b -PathType Leaf)) { [Console]::Error.WriteLine("[ds-spawn] brief not found: $b"); exit 2 } }
+
+$jobs = @()
+foreach ($b in $Briefs) {
+    $full = (Resolve-Path -LiteralPath $b).ProviderPath
+    $label = [IO.Path]::GetFileNameWithoutExtension($full)
+    $out = [IO.Path]::GetTempFileName()
+    $err = [IO.Path]::GetTempFileName()
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$launcher`"", '-TaskFile', "`"$full`"",
+        '-Dir', "`"$Dir`"", '-Label', $label, '-Mode', $Mode, '-Effort', $Effort,
+        '-MaxTurns', $MaxTurns, '-TimeoutMinutes', $TimeoutMinutes)
+    if ($NoCrosstalk) { $argList += '-NoCrosstalk' } elseif ($Crosstalk) { $argList += '-Crosstalk' }
+    $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -NoNewWindow -PassThru `
+        -RedirectStandardOutput $out -RedirectStandardError $err
+    $jobs += [pscustomobject]@{ Label = $label; Proc = $p; Out = $out; Err = $err }
+    # Stagger starts so two children never read the manifest counter at the same instant.
+    Start-Sleep -Milliseconds 800
+}
+Write-Output "[ds-spawn] started $($jobs.Count) worker(s) under $(if ($env:DS_RUN_ID) { $env:DS_RUN_ID } else { 'Claude' }): $($jobs.Label -join ', ')"
+
+$deadline = (Get-Date).AddMinutes($TimeoutMinutes + 2)
+foreach ($j in $jobs) {
+    $left = [int][Math]::Max(1000, ($deadline - (Get-Date)).TotalMilliseconds)
+    if (-not $j.Proc.WaitForExit($left)) { & taskkill.exe /PID $j.Proc.Id /T /F 2>$null | Out-Null }
+}
+
+$failed = 0
+foreach ($j in $jobs) {
+    $text = [IO.File]::ReadAllText($j.Out, $utf8).TrimEnd()
+    $errText = ([IO.File]::ReadAllText($j.Err, $utf8) -split "`r?`n" | Where-Object { $_ -match '^\[ds-agent\]' }) -join "`n"
+    $footer = ($text -split "`r?`n" | Where-Object { $_ -match '^\[ds-agent\] run=' } | Select-Object -Last 1)
+    $runId = if ($footer -match 'run=(\S+)') { $Matches[1] } else { $j.Label }
+    if (-not ($footer -match 'status=ok')) { $failed++ }
+    Write-Output ''
+    Write-Output "===== report from $runId ====="
+    if ($text) { Write-Output $text } else { Write-Output '(no output)' }
+    if ($errText) { Write-Output $errText }
+    Remove-Item -LiteralPath $j.Out, $j.Err -ErrorAction SilentlyContinue
+}
+Write-Output ''
+Write-Output "[ds-spawn] done: $($jobs.Count - $failed) ok, $failed failed"
+if ($failed) { exit 1 }
