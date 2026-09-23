@@ -31,7 +31,8 @@ param(
     [string]$Post,                        # re-run the checks for a finished checkout, no worker
     [switch]$DryRun,
     [switch]$NoSeed,                      # Rust: start the task's target/ empty instead of copying the lead's
-    [string]$WebDomains                   # comma-separated domains the worker may fetch; its edits stay in the worktree for review
+    [string]$WebDomains,                  # comma-separated domains the worker may fetch; its edits stay in the worktree for review
+    [switch]$Force                        # with -Integrate: copy even a file master has changed since the worker's base
 )
 $ErrorActionPreference = 'Stop'
 # Where this runs. From the DeepSeek Workers harness (launcher\ds-agent.ps1 beside tools\): the project is
@@ -136,10 +137,21 @@ if ($Integrate) {
     if (-not (Test-Path $meta)) { Fail "no such task: $Integrate" }
     $info = Get-Content $meta -Raw | ConvertFrom-Json
     $copied = @()
+    $moved = @()
     foreach ($file in $info.files) {
         $from = Join-Path $path $file
         if (-not (Test-Path -LiteralPath $from)) { "[ds-impl] $file was not written, skipped"; continue }
         $to = Join-Path $root $file
+        # The worker started from $info.base. If the lead has changed this file since, copying the whole
+        # file over silently throws those changes away (OpenSkyrim, 2026-09-23: a DemoStart entry and a
+        # plugin registration, both found afterwards by grep). Leave such a file alone and say so; the
+        # worker's own change can be applied as a patch instead. This covers every file in the task's
+        # list, not only the ones its brief calls owned: both losses above were one-line changes to
+        # files the worker did not own, which is why nobody was watching them.
+        if (-not $Force -and (Test-Path -LiteralPath $to)) {
+            $sinceBase = @(& git -C $root diff --name-only "$($info.base)" -- $file 2>$null)
+            if ($sinceBase) { $moved += $file; continue }
+        }
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $to) | Out-Null
         Copy-Item -LiteralPath $from -Destination $to -Force
         # Copy-Item keeps the worker's write time. If the lead built after the worker wrote the file,
@@ -148,7 +160,13 @@ if ($Integrate) {
         (Get-Item -LiteralPath $to).LastWriteTime = Get-Date
         $copied += $file
     }
-    "[ds-impl] copied into master: $($copied -join ', ')"
+    if ($copied) { "[ds-impl] copied into master: $($copied -join ', ')" }
+    foreach ($file in $moved) {
+        "[ds-impl] NOT copied, changed in master since the worker's base ($($info.base.Substring(0,7))): $file"
+        "[ds-impl]   apply the worker's own change instead:"
+        "[ds-impl]     git -C '$path' diff $($info.base) -- $file > patch.diff; git -C '$root' apply patch.diff"
+        "[ds-impl]   or re-run the task from the current base, or pass -Force to overwrite master's version"
+    }
     '[ds-impl] review with git diff, run the tests, then commit with an explicit path list.'
     exit 0
 }
@@ -202,9 +220,13 @@ if ($fromLead) {
             Fail "a lead's acceptance command must be a plain test command starting with one of: $($prefixes -join ', ') (no command separators, pipes, redirects or variables). Refused: $check"
         }
     }
+    # The project's denyEdit protects the main checkout from direct edits, which a worktree coder never
+    # makes; its work reaches the checkout only through Claude's -Integrate. So a lead may give a coder
+    # protected source (OpenSkyrim's crates/**: four leads landed no code on 2026-09-23 because this rule
+    # used to cover denyEdit too). The files that govern workers themselves stay Claude's.
     foreach ($file in $owned) {
         $f = $file -replace '\\', '/'
-        foreach ($rule in @($leadConfig.denyEdit) + @('.deepseek-agents.json', 'AGENTS.md', 'CLAUDE.md')) {
+        foreach ($rule in @('.deepseek-agents.json', 'AGENTS.md', 'CLAUDE.md', '.claude/**', 'tools/ds_*', 'tools/run_ds_queue.ps1')) {
             if (-not $rule) { continue }
             $pattern = '^' + [regex]::Escape(($rule -replace '\\', '/')).Replace('\*\*', '.*').Replace('\*', '[^/]*') + '$'
             if ($f -match $pattern) { Fail "a lead may not give a coder a protected file ($file matches $rule); ask Claude" }

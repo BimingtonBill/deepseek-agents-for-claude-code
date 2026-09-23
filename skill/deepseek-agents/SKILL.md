@@ -59,6 +59,8 @@ If the brief tells the worker to run commands (in backticks, e.g. `` `cargo test
 
 If the project has a glossary (`CONTEXT.md`, one per context in bigger repos), use its words in the brief and don't redefine them; if a brief keeps having to explain a term, that term belongs in the glossary.
 
+**Keep each brief small enough to finish in well under 100 steps.** Every step re-reads everything the worker has read so far, so a run's cost grows roughly with the square of its length: 83% of DeepSeek spend is that re-reading, and the six costliest runs were coders at 236-281 steps. Two half-size tasks cost about half of one big one. Split by file or by feature, and give each worker only the files it needs.
+
 **Done when** the brief has Goal, Context, Scope, Done when and Report; stands alone without this conversation; names no command a read-only worker cannot run; and lists the files a coder owns (or says the worker changes nothing).
 
 ## 2. Run the worker
@@ -99,7 +101,7 @@ Output is the worker's report, then a footer: `[ds-agent] run=<run id> session=<
 
 Workers often take several minutes. Run each one as a background command (`run_in_background: true`); its completion notification will interrupt whatever you are doing then. A worker's run time is your work time: see "Work while workers run".
 
-**Name the background command for the user.** The app's Background tasks panel shows only the command's description, so write it in this fixed format: `DeepSeek <kind> #<nnn>: <what it does>`, e.g. `DeepSeek impl #002: core scene + path tracer` or `DeepSeek review #007: check impl-004's BVH`. Add `(retry 2)` for a second attempt, `(resume 1)` for a resume, `(lead, spawns workers)` for `-CanSpawn`, and `(crosstalk)` when the brief has the worker talk to named siblings. Keep the whole description under about 60 characters so the panel doesn't cut it off.
+**Name the background command for the user.** The app's Background tasks panel shows only the command's description, so write it in this fixed format, which `ds_hook.py` enforces by refusing a launch without it: `DeepSeek <kind> #<nnn>: <what it does>`, e.g. `DeepSeek impl #002: core scene + path tracer` or `DeepSeek review #007: check impl-004's BVH`. Add `(retry 2)` for a second attempt, `(resume 1)` for a resume, `(lead, spawns workers)` for `-CanSpawn`, and `(crosstalk)` when the brief has the worker talk to named siblings. Keep the whole description under about 60 characters so the panel doesn't cut it off.
 
 When you redirect a worker's output to a file, do not name it `<stateDir>/<label>.json`: that is the launcher's own state file and it is deleted when the run ends, taking your output with it. Use another name or another folder.
 
@@ -229,7 +231,7 @@ A worker launched with `-CanSpawn` is a DeepSeek lead. It gets `write_brief` and
 
 1. `ds_impl.ps1 -List` shows the waiting tasks.
 2. Read each diff (`git -C local/impl/<name> diff`, plus new files).
-3. `ds_impl.ps1 -Integrate <name>` for the ones you accept.
+3. `ds_impl.ps1 -Integrate <name>` for the ones you accept. It leaves alone any file it would copy (every file in the task's list, not just the ones the brief calls owned) that you have changed yourself since the worker started, and prints the patch command instead, because copying the whole file would throw your change away; `-Force` overrides that.
 4. Run the tests on the combined result: coders never see each other's changes.
 
 Because DeepSeek wrote these briefs, ds_impl holds them to stricter rules. Owned files must be inside the project and not protected (`denyEdit`, AGENTS.md, CLAUDE.md, `.deepseek-agents.json`). Acceptance must be a plain test command (`cargo test`, `python -m unittest`, `npm test`, `go test`, `dotnet test` and similar, with no `;`, `|`, `&`, redirects or variables). A project can set its own list with `"leadAcceptance"` in `.deepseek-agents.json`. The acceptance still runs the coder's own tests on your machine, as it does for coders you start.

@@ -76,7 +76,14 @@ function Split-TaskId([string]$TaskId) {
 
 function Get-Description($child, [string]$LeadNumber, [int]$Index) {
     $kind, $number, $words = Split-TaskId $child.task_id
-    if (-not $number) { $number = if ($LeadNumber) { "$LeadNumber.$Index" } else { "$Index" } }
+    # A lead's worker is numbered under its lead (#008.1), so its entry says which lead it belongs to.
+    # write_brief gives every child its own number, and each lead counts from 001, so showing that number
+    # alone made two leads' workers both read #001 (the user found this confusing, 2026-09-23). The
+    # child's own number, without its leading zeros, is the part after the dot; its order is the fallback.
+    if ($LeadNumber) {
+        $sub = if ($number -match '^\d+$') { [string][int]$number } else { "$Index" }
+        $number = "$LeadNumber.$sub"
+    } elseif (-not $number) { $number = "$Index" }
     # A retry is an earlier attempt of the same task under the same parent; a name reused by an
     # unrelated run also raises the attempt number but is not a retry.
     $tags = ''

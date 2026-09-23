@@ -24,7 +24,19 @@ SPAWN = os.environ.get('DS_SPAWN_SCRIPT', '')
 WORK_DIR = os.environ.get('DS_WORK_DIR', os.getcwd())
 # impl-* briefs run as coders through tools/ds_impl.ps1, each in its own git worktree.
 IMPL = os.environ.get('DS_IMPL_SCRIPT', '')
-MAX_CODERS = 3
+
+
+def _max_coders():
+    """How many coders one spawn_workers call may run at once: the project's "leadCoders" in
+    .deepseek-agents.json, else 1. Each coder gets its own worktree and build (about 11 GB seeded for
+    OpenSkyrim), and overlapping builds ran the machine out of memory on 2026-09-23."""
+    try:
+        value = int(json.loads((Path(WORK_DIR) / '.deepseek-agents.json').read_text(encoding='utf-8')).get('leadCoders') or 1)
+    except (OSError, ValueError, TypeError, AttributeError):
+        value = 1
+    return max(1, min(value, 6))
+
+
 KINDS = ('research', 'websearch', 'impl', 'review', 'analysis', 'critic', 'digest')
 # Workers a lead starts are read-only and have no shell, so a brief telling one to run a command sends it
 # into workarounds until its turns run out (OpenSkyrim, 2026-09-23: research-001-glow-emissive and
@@ -72,7 +84,7 @@ if 'spawn' in ENABLED:
         'name': 'spawn_workers',
         'description': ('Launch up to 6 DeepSeek workers in parallel from briefs saved with write_brief, wait '
                         'for all of them, and return each report under its run id. Workers run read-only in '
-                        'your working directory. impl-* briefs run as coders instead (at most 3 per call): each '
+                        'your working directory. impl-* briefs run as coders instead (one per call unless the project allows more): each '
                         'in its own git worktree under local/impl/<name>, followed by a scope check and its '
                         'Acceptance commands; nothing reaches the real files until Claude integrates it. '
                         'Workers can message each other unless you set crosstalk false; tell each one the '
@@ -147,8 +159,11 @@ def call(name, args):
             return text('not saved with write_brief yet: %s' % ', '.join(missing), True)
         coders = [n for n in names if n.startswith('impl-')]
         readers = [n for n in names if n not in coders]
-        if len(coders) > MAX_CODERS:
-            return text('at most %d coders per call: each gets its own checkout and build' % MAX_CODERS, True)
+        cap = _max_coders()
+        if len(coders) > cap:
+            return text('at most %d coder(s) per call in this project: each gets its own worktree and build. Run '
+                        'the rest in a later call once these finish, or ask Claude to raise "leadCoders" in '
+                        '.deepseek-agents.json.' % cap, True)
         if coders and not IMPL:
             return text('coders are not available here (tools/ds_impl.ps1 was not found)', True)
         jobs = []

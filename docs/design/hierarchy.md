@@ -180,10 +180,30 @@ real gap was that nothing tells a lead where a child's report lives, so re-readi
 path.
 
 `ds-spawn.ps1` now prints `(also saved at <state dir>/runs/<run id>/report.md)` above each report, using
-uns\<run id>
-eport.md)` above each report, using
 the launcher's own state-dir rule.
 
 **Evidence.** `lead-006-report-path.1`: spawned one worker, was given the path, read it with `Read`
 ("11 lines, no error") and confirmed the file's body was "character-for-character" the report it had been
 handed, plus the header comment and the `[ds-agent]` footer line the file adds.
+
+## A lead's coder may own protected source; one coder per call (2026-09-23)
+
+OpenSkyrim's portal session reported four leads (lead-070, -071, -072, -102) that landed no code: every
+coder they tried was refused with "a lead may not give a coder a protected file (crates/...rs matches
+crates/**)". That rule treated the project's `denyEdit` as off limits to a lead's coders. But `denyEdit`
+protects the main checkout from direct edits, and a coder only ever edits its own worktree; its work
+reaches the checkout through Claude's `-Integrate`. So a lead may now give a coder protected source. The
+files that govern workers themselves stay Claude's: `.deepseek-agents.json`, AGENTS.md, CLAUDE.md,
+`.claude/**`, `tools/ds_*` and `tools/run_ds_queue.ps1`.
+
+A lead runs one coder per `spawn_workers` call unless the project sets `"leadCoders"` (up to 6): each
+Rust worktree seeds about 11 GB, and overlapping builds ran the machine out of memory the same day.
+
+**Evidence.** Dry runs as a lead in a project protecting `textkit/**`: owning `textkit/slug.py` allowed;
+AGENTS.md, `.deepseek-agents.json` and `tools/ds_impl.ps1` refused. Two impl briefs in one call refused
+with the cap; `leadCoders: 2` raised it. `lead-009-protected.1` then started `impl-002-slugify.1`, which
+owned the protected `textkit/slug.py`, finished in 37 s with scope ok and acceptance passing, while the
+main checkout's copy stayed the untouched stub.
+
+Not built: a lead sending its coder corrections (resume) before Claude reviews. A lead can read the
+coder's worktree and put corrections in its report.

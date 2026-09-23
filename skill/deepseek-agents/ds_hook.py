@@ -2,8 +2,11 @@
 
 Registered by tools/install-skill.ps1 in ~/.claude/settings.json for the Bash and PowerShell tools:
 
-    PreToolUse   a launch of ds-agent.ps1 with -CanSpawn that is not run in the background is refused,
-                 with the reason, so Claude re-runs it in the background under a panel description.
+    PreToolUse   a worker launch (ds-agent.ps1, or ds_impl.ps1 starting a coder) is refused unless it
+                 runs in the background under a panel description in the house format,
+                 "DeepSeek <kind> #<nnn>: <what>", so the panel says what each entry is. OpenSkyrim's
+                 panel read "Launch the shadows worker" (2026-09-23), which hides the kind, the number
+                 and the project.
     PostToolUse  after a lead starts, Claude is told the exact ds-watch.ps1 -Children command to start
                  next, so the lead's workers get their own Background tasks entries.
 
@@ -14,6 +17,7 @@ untouched, and any error here lets the tool call through: a broken hook must nev
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -40,6 +44,71 @@ else:
     ds_state = None
 
 WATCH = Path(__file__).resolve().parent / 'ds-watch.ps1'
+KINDS = ('research', 'websearch', 'impl', 'review', 'analysis', 'critic', 'digest', 'advisor', 'lead',
+         'selftest', 'probe')
+# "DeepSeek <kind> #<nnn>: <what>", the panel format in the skill.
+PANEL = re.compile(r'^DeepSeek (%s) #\d{3}(\.\d+)?: \S' % '|'.join(KINDS))
+
+
+def without_heredocs(cmd):
+    """The command with any here-document body removed. A script written into a file
+    (python - <<PY ... PY) often contains a launch line as text: that is data, not a command."""
+    out, terminator = [], None
+    for line in cmd.split('\n'):
+        if terminator is not None:
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        out.append(line)
+        m = re.search(r'<<-?\s*["\']?([A-Za-z_][A-Za-z_0-9]*)["\']?', line)
+        if m:
+            terminator = m.group(1)
+    return '\n'.join(out)
+
+
+SHELLS = ('powershell', 'powershell.exe', 'pwsh', 'pwsh.exe')
+SCRIPTS = ('ds-agent.ps1', 'ds_impl.ps1')
+MANAGEMENT = re.compile(r'^-(DryRun|List|Integrate|Discard|Post)$', re.I)
+
+
+def _words(segment):
+    """A segment split like a shell would, quotes kept together, so a path with a space is one word.
+    posix=False keeps Windows backslashes; the quotes are stripped afterwards."""
+    try:
+        words = shlex.split(segment, posix=False)
+    except ValueError:
+        words = segment.split()
+    return [w.strip('"\'') for w in words]
+
+
+def launches_worker(cmd):
+    """True when this command really starts a worker, rather than mentioning one.
+
+    A segment counts when it runs the launcher or ds_impl itself: a PowerShell given the script as its
+    -File (the path may contain spaces, and the shell may be a quoted full path), or the script invoked
+    directly or with the call operator &. Text that merely contains the names (a grep pattern, a script
+    being written in a here-document, a quoted message) does not count, nor do dry runs and ds_impl's
+    management commands. Found by review-024: the first version split paths at their spaces, so any
+    launch from a folder such as "DeepSeek Workers" went unchecked."""
+    for segment in re.split(r'&&|\|\||;|\n', without_heredocs(cmd)):
+        words = _words(segment)
+        while words and re.match(r'^[A-Za-z_][A-Za-z_0-9]*=', words[0]):   # VAR=value prefixes
+            words.pop(0)
+        if words and words[0] == '&':
+            words.pop(0)
+        if not words:
+            continue
+        first = Path(words[0]).name.lower()
+        if first in SHELLS:
+            script = next((words[i + 1] for i, w in enumerate(words[:-1]) if w.lower() == '-file'), '')
+        else:
+            script = words[0]
+        if Path(script).name.lower() not in SCRIPTS:
+            continue
+        if any(MANAGEMENT.match(w) for w in words):
+            continue
+        return True
+    return False
 
 
 def arg(cmd, name):
@@ -67,24 +136,45 @@ def main():
         return
     tool_input = event.get('tool_input') or {}
     cmd = str(tool_input.get('command') or tool_input.get('script') or '')
-    if 'ds-agent.ps1' not in cmd or not re.search(r'-CanSpawn\b', cmd, re.I) or re.search(r'-DryRun\b', cmd, re.I):
+    if not launches_worker(cmd):
         return
-    label = arg(cmd, 'Label') or (Path(arg(cmd, 'TaskFile')).stem if arg(cmd, 'TaskFile') else None) or 'task'
+    label = (arg(cmd, 'Label') or arg(cmd, 'Name')
+             or (Path(arg(cmd, 'TaskFile') or arg(cmd, 'Brief')).stem if (arg(cmd, 'TaskFile') or arg(cmd, 'Brief')) else None)
+             or 'task')
     hook = event.get('hook_event_name')
+
+    # The panel is how a human sees what is running, so every worker entry names its kind and number.
+    if hook == 'PreToolUse' and not PANEL.match(str(tool_input.get('description') or '')):
+        kind, number = 'research', '001'
+        parts = label.split('-')
+        if parts and parts[0] in KINDS:
+            kind = parts[0]
+            if len(parts) > 1 and parts[1].isdigit():
+                number = parts[1].zfill(3)
+        what = ' '.join(parts[2:]) if len(parts) > 2 else (label if kind == 'research' else 'what it does')
+        tail = ' (lead, spawns workers)' if re.search(r'-CanSpawn\b', cmd, re.I) else ''
+        print(json.dumps({'hookSpecificOutput': {
+            'hookEventName': 'PreToolUse',
+            'permissionDecision': 'deny',
+            'permissionDecisionReason': (
+                'A worker launch needs a Background tasks description in the house format, so the panel '
+                'says what the entry is: "DeepSeek %s #%s: %s"%s. Run the same command again with that '
+                'description (and run_in_background true).' % (kind, number, what, tail)),
+        }}))
+        return
 
     if hook == 'PreToolUse' and not tool_input.get('run_in_background'):
         print(json.dumps({'hookSpecificOutput': {
             'hookEventName': 'PreToolUse',
             'permissionDecision': 'deny',
             'permissionDecisionReason': (
-                'A DeepSeek lead must run in the background, so that it and its workers appear in the '
-                'Background tasks panel. Run the same command again with run_in_background true and the '
-                'description "DeepSeek lead #<nnn>: <what> (lead, spawns workers)". This hook will then give '
-                'you the watcher command to start straight after.'),
+                'A DeepSeek worker must run in the background, so it appears in the Background tasks panel '
+                'and you can keep working while it runs. Run the same command again with run_in_background '
+                'true. For a lead, this hook then gives you the watcher command to start straight after.'),
         }}))
         return
 
-    if hook == 'PostToolUse':
+    if hook == 'PostToolUse' and re.search(r'-CanSpawn\b', cmd, re.I):
         folder = state_dir(cmd, event.get('cwd') or os.getcwd())
         shell_var = re.search(r'[$%]', folder)
         watch = 'powershell -NoProfile -ExecutionPolicy Bypass -File "%s" -Children %s -StateDir "%s"' % (
