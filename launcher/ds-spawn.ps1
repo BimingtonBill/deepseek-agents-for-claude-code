@@ -66,11 +66,10 @@ foreach ($j in $jobs) {
     if (-not $j.Proc.WaitForExit($left)) { & taskkill.exe /PID $j.Proc.Id /T /F 2>$null | Out-Null }
 }
 
-# Where the launcher keeps run records, by its own rule: DS_STATE_DIR, else the project's local/agents when
-# local/ exists, else ~/.claude-deepseek/agents. Only used to tell the lead where each report is saved.
-$stateDir = if ($env:DS_STATE_DIR) { $env:DS_STATE_DIR }
-            elseif (Test-Path -LiteralPath (Join-Path $Dir 'local')) { Join-Path $Dir 'localgents' }
-            else { Join-Path $HOME '.claude-deepseekgents' }
+# Where the launcher keeps run records, by the launcher's own rule (launcher/ds-state.ps1, beside this
+# script): DS_STATE_DIR, then the project's "stateDir", then local/agents when local/ exists, else
+# ~/.claude-deepseek/agents. Only used to tell the lead where each report is saved.
+$stateDir = & (Join-Path $PSScriptRoot 'ds-state.ps1') -Dir $Dir
 
 $failed = 0
 foreach ($j in $jobs) {

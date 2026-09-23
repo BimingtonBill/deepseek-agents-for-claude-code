@@ -1,6 +1,6 @@
 ---
 name: deepseek-agents
-description: Lead a team of DeepSeek V4.1 worker agents. You plan, delegate and review; headless DeepSeek-powered Claude Code workers do well-scoped subtasks (exploring code, mechanical edits, tests, drafts). Use when the user asks for DeepSeek agents or workers, asks you to lead or delegate to DeepSeek, or runs /deepseek-agents, and whenever the project's AGENTS.md sets a DeepSeek delegation level of 2 or more.
+description: Lead a team of DeepSeek V4.1 worker agents. You plan, delegate and review; headless DeepSeek-powered Claude Code workers do well-scoped subtasks (exploring code, mechanical edits, tests, drafts). Use when the user asks for DeepSeek workers, when they run /deepseek-agents, and whenever the project's AGENTS.md sets a DeepSeek delegation level of 2 or more.
 ---
 
 # DeepSeek worker agents
@@ -36,6 +36,8 @@ It prints one line per tool (found with path and version, or MISSING, with the p
 
 Don't install it yourself unless the user says to. Go ahead without the tool only when the user chooses to. Workers follow the same rule: they report a missing tool to you instead of working around it (the launcher tells them so), and you bring it to the user.
 
+**Done when** every tool the plan needs is installed, or you have asked the user to install what is missing and they have answered.
+
 ## 1. Write the brief
 
 Write each brief to its own UTF-8 file in your scratchpad directory (or `$env:TEMP`). Make it complete, because the worker cannot ask questions:
@@ -54,6 +56,10 @@ The exact shape of the answer you want back, e.g. findings as path:line - issue.
 ```
 
 If the brief tells the worker to run commands (in backticks, e.g. `` `cargo test -p gpu` ``), give it matching `-AllowTools` rules. The launcher warns (`the brief names commands this worker may not run`) when a backticked command has no matching rule, or uses inline `python -c`, which workers can never run. Fix the rules or the brief before going on: a worker told to run something it can't will spend its turns working around it.
+
+If the project has a glossary (`CONTEXT.md`, one per context in bigger repos), use its words in the brief and don't redefine them; if a brief keeps having to explain a term, that term belongs in the glossary.
+
+**Done when** the brief has Goal, Context, Scope, Done when and Report; stands alone without this conversation; names no command a read-only worker cannot run; and lists the files a coder owns (or says the worker changes nothing).
 
 ## 2. Run the worker
 
@@ -91,7 +97,7 @@ The same command works from both the Bash and PowerShell tools.
 
 Output is the worker's report, then a footer: `[ds-agent] run=<run id> session=<id> status=ok turns=<n> tokens_in=... tokens_out=...`. On failure, status reads `error(<reason>)`, e.g. `error(error_max_turns)`, and the report text holds the error message. A `[claude-code:unrecognized_model]` line on stderr is expected, because Claude Code doesn't know DeepSeek's model names. A `denied=` entry means the worker tried a tool it was not allowed. Decide whether to rerun it with more `-AllowTools` rules or do that step yourself.
 
-Workers often take several minutes. Run each one as a background command (`run_in_background: true`); its completion notification will interrupt whatever you are doing then. A worker's run time is your work time, not a wait: see "Work while workers run".
+Workers often take several minutes. Run each one as a background command (`run_in_background: true`); its completion notification will interrupt whatever you are doing then. A worker's run time is your work time: see "Work while workers run".
 
 **Name the background command for the user.** The app's Background tasks panel shows only the command's description, so write it in this fixed format: `DeepSeek <kind> #<nnn>: <what it does>`, e.g. `DeepSeek impl #002: core scene + path tracer` or `DeepSeek review #007: check impl-004's BVH`. Add `(retry 2)` for a second attempt, `(resume 1)` for a resume, `(lead, spawns workers)` for `-CanSpawn`, and `(crosstalk)` when the brief has the worker talk to named siblings. Keep the whole description under about 60 characters so the panel doesn't cut it off.
 
@@ -99,17 +105,64 @@ When you redirect a worker's output to a file, do not name it `<stateDir>/<label
 
 While a worker runs, `<stateDir>/<label>.json` holds its `claude.exe` pid and the `taskkill` line that stops it — the worker survives its launcher being killed, so that file is how you stop a runaway. Each finished run appends a row to `<stateDir>/runs.csv` (status, turns, tokens, seconds, denied tools). `stateDir` is `local/agents` when the project has a `local/` folder, otherwise `~/.claude-deepseek/agents`.
 
-## Web research and edits
+**Done when** the launch is a background command with a panel description in the fixed format, its options match the work (mode, effort, limits, web access), and you have started your own next task rather than waiting.
 
-**For a web lookup, use a websearch worker:** `-Kind websearch`, or a label starting `websearch-`. It has WebSearch and WebFetch on the open web (`-WebDomains` narrows it) and nothing else. It has no file tools, and it starts in an empty folder so no project instructions reach it. So a planted instruction on a page has nothing to read or change, and nothing private can leak into a query. Put everything it needs in the brief, and nothing private. It reports each claim with URLs, the number of independent sources and its confidence. A lookup takes about half a minute to two minutes, so it is capped at 30 turns and 10 minutes whatever the project defaults. Pass an explicit `-MaxTurns`/`-TimeoutMinutes` for a deliberately deep search; a lead's websearch workers always get the caps. A read-only lead, or one working in a worktree, may start websearch workers; a lead that edits the main checkout may not. Its findings are still web claims: check the ones you act on.
+## 3. Run several in parallel
 
-A web page can state something false that nobody in the run can disprove. In a probe, a lead given one plausible changelog page about an obscure package bumped the pin in `requirements.txt`, while saying itself that the claim was unverified (`docs/design/websearch-injection.md`). So the launcher treats web-sourced changes as proposals until you have checked them:
+Start independent workers in one message, each as its own background command. Give edit-mode workers disjoint files: two workers must never edit the same file. For large or risky edits, give each worker its own git worktree as `-Dir` and merge the results yourself.
 
-- A run that can fetch pages (`-WebDomains`, or `webDomains` in the project config), or any worker a web-reading lead starts, may edit only inside an isolated git worktree. In the main checkout the launch is refused. For one worker, use `tools/ds_impl.ps1 -WebDomains <domains>`; for a lead, `git worktree add` a checkout and point `-Dir` at it.
-- Better still, split it: a read-only web lookup, then an edit run you brief yourself once you have checked the findings.
-- Web-reading runs may also fetch the package registries (pypi.org, crates.io, registry.npmjs.org, api.nuget.org, proxy.golang.org), so they can check a version claim instead of trusting the page. A project's `"verifyDomains"` replaces that list.
-- Their reports list every change resting on web content under **Web-sourced**, with its URL and how it was checked. Before integrating, verify each such change yourself against an authoritative source. The worker's own "unverified" label is not a review.
-- Pass `-WebEdit` only when the user has approved web-sourced edits applied directly.
+**Parallel workers must not share build output.** Disjoint source files are not enough: in a Rust workspace every checkout gives a crate's test binary the same name, so two workers sharing one `target/` overwrote and ran each other's tests (OpenSkyrim impl-006/impl-007: an "acceptance FAIL" that was really the neighbour's binary). The harness's `tools/ds_impl.ps1` gives each task its own `target/` inside its worktree, and seeds it with a copy of the lead's `target/debug`, which takes seconds (6.6 GB in 6 s), so only the workspace's own crates rebuild (17 s instead of a cold Bevy build). `-NoSeed` starts it empty. If you launch parallel edit workers any other way, set `CARGO_TARGET_DIR` per worker yourself. The same applies to any build tool with one shared output folder.
+
+The harness's tools (`ds_impl.ps1`, `ds_status.ps1`, `run_ds_queue.ps1`, `ds_report.py`, `ds_manifest.py`, `ds_delegation.py`, `check_*.py` ...) are installed in this skill's `tools/` folder (`$HOME/.claude/skills/deepseek-agents/tools/`). Run them from the project folder and they act on that project: `powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME/.claude/skills/deepseek-agents/tools/ds_impl.ps1" -Brief <brief>`. A project can also copy them into its own `tools/` unchanged: a copy acts on the project it sits in and launches workers through this skill. Diff first if the project has customised its copy.
+
+An acceptance failure from a parallel run is not evidence until you know the build was the worker's own. Record the real cause in `pilot.csv` when you accept over a harness verdict. `python tools/ds_report.py` sums the record, and now counts denied tools by name (`5 with denied tools (Bash 5, Glob 1)`).
+
+**Done when** each worker has its own background entry, no two can touch the same files or build output, and your own parallel work cannot collide with any of them.
+
+## Work while workers run
+
+Workers run for minutes; a launch that leaves you idle until the report arrives wastes most of that time. In the OpenSkyrim Blackreach demo, Claude launched three workers, did two minutes of its own work, then announced "all three workers are running" and did nothing for the remaining 3.5 minutes; later it sat through a 10-minute release build with no worker running at all. The right shape is: Claude and the workers busy at the same time, on things that cannot collide.
+
+**Before launching, decide what you will do while they run.** When you plan a batch, split the job into the workers' parts and Claude's own part, and say both in the same message. Claude's part is work that needs this conversation or your judgement and touches nothing a worker owns:
+- the next brief(s), drafted from what is already known so they are ready to launch the moment a worker's report lands (a report that changes the brief is a small edit, not a restart);
+- integration plumbing for the results that are coming: the wiring, config flags, module registration and test fixtures the worker's files will plug into, in files no worker owns;
+- reviewing the *previous* worker's report and diff, and spot-checking its claims;
+- your own tests, builds, screenshots and measurements of already-integrated work;
+- writing the design or contract for the phase after this one;
+- housekeeping: handoff notes, the queue file, the manifest, commits of finished work.
+
+**Keep read-only workers out of your scratch.** A research worker with the whole project readable will read `local/impl/*` worktrees and live logs and mix them up with the real tree (stress test 2: one attributed numbers to the wrong build from file times). Put `local/**` in the project's `denyRead`, or add `-DenyEdit`-style read limits for the run, and name the exact files it should read in the brief.
+
+**Keep apart from a running worker:** anything in a file a running worker owns; a build in a shared output folder a worker is building into (see the target/ rule above); an acceptance run of a worktree still being written. Running the game, the GPU or a physical device stays serial.
+
+**Long commands of your own are background tasks too.** A release build, a data conversion or a test campaign that takes minutes is the same case as a worker: start it in the background, do the next thing, and let its notification bring you back. Chain the two: when the build finishes, the next worker can be briefed against it.
+
+**When a report lands, finish your current step before switching.** The notification interrupts you; note it, complete the edit or command in hand, then review. Don't leave your own work half-done to read a report that will wait.
+
+**Keep enough independent work queued.** A batch of three workers plus one Claude-side task is well balanced; a batch of three workers plus "watch them" is not. If you cannot think of anything safe to do while they run, that is a sign the split is wrong: either the workers have the whole job and you should give one of them the reviewer's role too, or you kept something that should have been a fourth brief.
+
+## 4. Review before you accept
+
+Treat every report as a draft from a junior engineer:
+
+- Spot-check its claims by opening the cited files and lines.
+- After an edit-mode run, read the full `git diff` of what the worker changed and run the tests or build.
+- After integrating a worker's files, a suspiciously fast build means stale sources: the build tool thinks nothing changed. `ds_impl.ps1 -Integrate` refreshes the copied files' timestamps for this reason; if you copy files another way, touch them first.
+- If the work is off, resume the same worker with specific corrections, or fix it yourself when that is faster.
+
+Tell the user which parts DeepSeek workers did.
+
+**Done when** every claim you are acting on has been checked against its source, every edit has been read as a diff, the tests have run on the combined result, and anything you could not verify is written down as unverified.
+
+## Reference
+
+The sections below are on-demand: read the one the job needs.
+
+## Design it twice before a big brief
+
+When the shape of a module or interface is the open question, don't brief the first design you think of. Start three `-Kind research` workers in parallel, each told to produce a **deliberately different** interface: one for the smallest surface (one to three entry points), one for the most flexible, one for the easiest call at the site that calls it most. Give each the project's own vocabulary (its CONTEXT.md, if it has one) and ask each for the interface, one usage example, what it hides, and its trade-offs. Compare them yourself, pick or combine, then write the implementation brief. Three short workers cost a few cents and a couple of minutes, and they beat committing to the first shape.
+
+**Done when** you have three different designs, a choice, and a one-line reason for it in the brief you then write.
 
 ## Effort
 
@@ -133,6 +186,26 @@ Each run keeps `<stateDir>/runs/<run id>/` with `brief.md`, `report.md` and `man
 python "$HOME/.claude/skills/deepseek-agents/tools/ds_manifest.py" --tree        # from the project folder: Claude -> leads -> workers
 python "$HOME/.claude/skills/deepseek-agents/tools/ds_manifest.py" --write       # writes <stateDir>/MANIFEST.md
 ```
+
+## Project policy: .deepseek-agents.json
+
+A project can keep its worker policy in `.deepseek-agents.json` at its root, so every launch gets it without repeating flags:
+
+```json
+{
+  "readOnlyDirs": ["D:/Games/Example"],
+  "denyEdit": ["src/**", "AGENTS.md"],
+  "denyRead": ["secrets/**"],
+  "deny": ["Bash(rm *)"],
+  "allowTools": "Bash(git add *),Bash(git commit *)",
+  "_note": "allowTools applies to edit-mode runs only; read mode stays Read/Grep/Glob",
+  "stateDir": "local/agents",
+  "delegationLevel": 3,
+  "defaults": { "mode": "edit", "effort": "max", "maxTurns": 400, "timeoutMinutes": 150 }
+}
+```
+
+Explicit flags always beat `defaults`. Deny rules cover the file tools and the shell redirects Claude Code recognises, but not a script the worker writes and runs, so keep stating the rule in the brief as well. When a project has one, read it before writing briefs: it tells you what workers may touch. `-DryRun` prints the resolved policy.
 
 ## Crosstalk
 
@@ -168,9 +241,21 @@ Because DeepSeek wrote these briefs, ds_impl holds them to stricter rules. Owned
 3. When it exits, start each printed `-Run` watcher with its printed description. If the lead is still running, start the printed `-Children ... -Known ...` command again, so later workers get entries too.
 4. Each `-Run` watcher exits when its worker ends, and prints the outcome and report. Review each report as it lands; don't wait for the lead's merged report.
 
-**Don't block while a lead runs.** Its watchers only help if you're free when they fire: a long foreground wait (a `sleep` loop, a command that polls for minutes) holds you there, and a lead's new workers get no panel entry until it ends. Wait for notifications instead.
+**Keep working while a lead runs.** Its watchers only help if you're free when they fire: a long foreground wait (a `sleep` loop, a command that polls for minutes) holds you there, and a lead's new workers get no panel entry until it ends. Wait for notifications instead.
 
 A watcher only waits: stopping one in the panel does not stop the worker (`tools/ds_status.ps1 -Stop <label>` does). If the manifest isn't in `<project>/local/agents`, pass `-StateDir`.
+
+## Web research and edits
+
+**For a web lookup, use a websearch worker:** `-Kind websearch`, or a label starting `websearch-`. It has WebSearch and WebFetch on the open web (`-WebDomains` narrows it) and nothing else. It has no file tools, and it starts in an empty folder so no project instructions reach it. So a planted instruction on a page has nothing to read or change, and nothing private can leak into a query. Put everything it needs in the brief, and nothing private. It reports each claim with URLs, the number of independent sources and its confidence. A lookup takes about half a minute to two minutes, so it is capped at 30 turns and 10 minutes whatever the project defaults. Pass an explicit `-MaxTurns`/`-TimeoutMinutes` for a deliberately deep search; a lead's websearch workers always get the caps. A read-only lead, or one working in a worktree, may start websearch workers; a lead that edits the main checkout may not. Its findings are still web claims: check the ones you act on.
+
+A web page can state something false that nobody in the run can disprove. In a probe, a lead given one plausible changelog page about an obscure package bumped the pin in `requirements.txt`, while saying itself that the claim was unverified (`docs/design/websearch-injection.md`). So the launcher treats web-sourced changes as proposals until you have checked them:
+
+- A run that can fetch pages (`-WebDomains`, or `webDomains` in the project config), or any worker a web-reading lead starts, may edit only inside an isolated git worktree. In the main checkout the launch is refused. For one worker, use `tools/ds_impl.ps1 -WebDomains <domains>`; for a lead, `git worktree add` a checkout and point `-Dir` at it.
+- Better still, split it: a read-only web lookup, then an edit run you brief yourself once you have checked the findings.
+- Web-reading runs may also fetch the package registries (pypi.org, crates.io, registry.npmjs.org, api.nuget.org, proxy.golang.org), so they can check a version claim instead of trusting the page. A project's `"verifyDomains"` replaces that list.
+- Their reports list every change resting on web content under **Web-sourced**, with its URL and how it was checked. Before integrating, verify each such change yourself against an authoritative source. The worker's own "unverified" label is not a review.
+- Pass `-WebEdit` only when the user has approved web-sourced edits applied directly.
 
 ## Delegation level: how much to hand off
 
@@ -186,68 +271,23 @@ Each project has a delegation level from 1 to 5 that says how much of the work g
 
 At **every** level Claude keeps the conversation with the user, design decisions, integration, security-sensitive changes, and review of every worker result it acts on. The dial moves work, not the quality bar. When the user says "use workers more" or "less", or names a number, set it with `ds_delegation.py --set <1-5> --agents-md` from the project folder (`--global` sets their default for all projects) and say what changed.
 
-## Project policy: .deepseek-agents.json
+## Working with the Matt Pocock skills
 
-A project can keep its worker policy in `.deepseek-agents.json` at its root, so every launch gets it without repeating flags:
+When the `mattpocock-skills` plugin is installed, every step in it that says "sub-agent" or "background agent" is a DeepSeek worker's job from delegation level 2 up. Their skills stay as written; you supply the workers.
 
-```json
-{
-  "readOnlyDirs": ["D:/Games/Example"],
-  "denyEdit": ["src/**", "AGENTS.md"],
-  "denyRead": ["secrets/**"],
-  "deny": ["Bash(rm *)"],
-  "allowTools": "Bash(git add *),Bash(git commit *)",
-  "_note": "allowTools applies to edit-mode runs only; read mode stays Read/Grep/Glob",
-  "stateDir": "local/agents",
-  "delegationLevel": 3,
-  "defaults": { "mode": "edit", "effort": "max", "maxTurns": 400, "timeoutMinutes": 150 }
-}
-```
+| Their step | Give it to |
+|---|---|
+| `research`: "spin up a background agent to do the research" | `-Kind websearch` for the open web, `-Kind research` for the repo. Keep their output convention: one Markdown file where the repo already keeps notes, every claim cited. The worker reports to you; you write the file. |
+| `code-review`: the Standards and Spec sub-agents | Two `-Kind review` workers in parallel, one per axis. Paste the 12-smell baseline into the Standards brief in full (the worker has no other access to it), hold both briefs to the skill's 400 words, and report the axes separately: no merging, no reranking. |
+| `codebase-design`: Design It Twice, "3+ sub-agents in parallel" | Three or four `-Kind research` workers, one constraint each (smallest interface, most flexible, best for the common caller, ports and adapters), with the project's CONTEXT.md vocabulary in every brief. |
+| `improve-codebase-architecture`: "spawn a sub-agent to walk the codebase" | One `-Kind research` worker for the friction walk. Its HTML report stays out of the repo, in the temp folder. |
+| `grilling`: "dispatch a sub-agent to find" a fact | One `-Kind websearch` worker, and carry on with the round while it runs. |
+| `to-tickets` / `wayfinder`: tickets marked `ready-for-agent` | One coder per ticket through `tools/ds_impl.ps1`: owned files from the ticket, acceptance from its test command. |
+| `tdd`: one red-green slice | A coder per slice, at seams the user has confirmed. Refactoring belongs to review, not the loop. |
 
-Explicit flags always beat `defaults`. Deny rules cover the file tools and the shell redirects Claude Code recognises, but not a script the worker writes and runs, so keep stating the rule in the brief as well. When a project has one, read it before writing briefs: it tells you what workers may touch. `-DryRun` prints the resolved policy.
+Keep for yourself: `diagnosing-bugs` phases 1 and 2, because workers have no shell and cannot build or run a reproduction loop (once you have one, an `-Kind analysis` worker can read the captured output); `domain-modeling`, which edits CONTEXT.md and ADRs; and every decision their skills route to the user.
 
-## 3. Run several in parallel
-
-Start independent workers in one message, each as its own background command. Give edit-mode workers disjoint files: two workers must never edit the same file. For large or risky edits, give each worker its own git worktree as `-Dir` and merge the results yourself.
-
-**Parallel workers must not share build output.** Disjoint source files are not enough: in a Rust workspace every checkout gives a crate's test binary the same name, so two workers sharing one `target/` overwrote and ran each other's tests (OpenSkyrim impl-006/impl-007: an "acceptance FAIL" that was really the neighbour's binary). The harness's `tools/ds_impl.ps1` gives each task its own `target/` inside its worktree, and seeds it with a copy of the lead's `target/debug`, which takes seconds (6.6 GB in 6 s), so only the workspace's own crates rebuild (17 s instead of a cold Bevy build). `-NoSeed` starts it empty. If you launch parallel edit workers any other way, set `CARGO_TARGET_DIR` per worker yourself. The same applies to any build tool with one shared output folder.
-
-The harness's tools (`ds_impl.ps1`, `ds_status.ps1`, `run_ds_queue.ps1`, `ds_report.py`, `ds_manifest.py`, `ds_delegation.py`, `check_*.py` ...) are installed in this skill's `tools/` folder (`$HOME/.claude/skills/deepseek-agents/tools/`). Run them from the project folder and they act on that project: `powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME/.claude/skills/deepseek-agents/tools/ds_impl.ps1" -Brief <brief>`. A project can also copy them into its own `tools/` unchanged: a copy acts on the project it sits in and launches workers through this skill. Diff first if the project has customised its copy.
-
-An acceptance failure from a parallel run is not evidence until you know the build was the worker's own. Record the real cause in `pilot.csv` when you accept over a harness verdict. `python tools/ds_report.py` sums the record, and now counts denied tools by name (`5 with denied tools (Bash 5, Glob 1)`).
-
-## Work while workers run
-
-Workers run for minutes; a launch that leaves you idle until the report arrives wastes most of that time. In the OpenSkyrim Blackreach demo, Claude launched three workers, did two minutes of its own work, then announced "all three workers are running" and did nothing for the remaining 3.5 minutes; later it sat through a 10-minute release build with no worker running at all. The right shape is: Claude and the workers busy at the same time, on things that cannot collide.
-
-**Before launching, decide what you will do while they run.** When you plan a batch, split the job into the workers' parts and Claude's own part, and say both in the same message. Claude's part is work that needs this conversation or your judgement and touches nothing a worker owns:
-- the next brief(s), drafted from what is already known so they are ready to launch the moment a worker's report lands (a report that changes the brief is a small edit, not a restart);
-- integration plumbing for the results that are coming: the wiring, config flags, module registration and test fixtures the worker's files will plug into, in files no worker owns;
-- reviewing the *previous* worker's report and diff, and spot-checking its claims;
-- your own tests, builds, screenshots and measurements of already-integrated work;
-- writing the design or contract for the phase after this one;
-- housekeeping: handoff notes, the queue file, the manifest, commits of finished work.
-
-**Keep read-only workers out of your scratch.** A research worker with the whole project readable will read `local/impl/*` worktrees and live logs and mix them up with the real tree (stress test 2: one attributed numbers to the wrong build from file times). Put `local/**` in the project's `denyRead`, or add `-DenyEdit`-style read limits for the run, and name the exact files it should read in the brief.
-
-**What not to do in parallel:** anything in a file a running worker owns; a build in a shared output folder a worker is building into (see the target/ rule above); an acceptance run of a worktree still being written. Running the game, the GPU or a physical device stays serial.
-
-**Long commands of your own are background tasks too.** A release build, a data conversion or a test campaign that takes minutes is the same case as a worker: start it in the background, do the next thing, and let its notification bring you back. Chain the two: when the build finishes, the next worker can be briefed against it.
-
-**When a report lands, finish your current step before switching.** The notification interrupts you; note it, complete the edit or command in hand, then review. Don't leave your own work half-done to read a report that will wait.
-
-**Keep enough independent work queued.** A batch of three workers plus one Claude-side task is well balanced; a batch of three workers plus "watch them" is not. If you cannot think of anything safe to do while they run, that is a sign the split is wrong: either the workers have the whole job and you should give one of them the reviewer's role too, or you kept something that should have been a fourth brief.
-
-## 4. Review before you accept
-
-Treat every report as a draft from a junior engineer:
-
-- Spot-check its claims by opening the cited files and lines.
-- After an edit-mode run, read the full `git diff` of what the worker changed and run the tests or build.
-- After integrating a worker's files, a suspiciously fast build means stale sources: the build tool thinks nothing changed. `ds_impl.ps1 -Integrate` refreshes the copied files' timestamps for this reason; if you copy files another way, touch them first.
-- If the work is off, resume the same worker with specific corrections, or fix it yourself when that is faster.
-
-Tell the user which parts DeepSeek workers did.
+Preserve their conventions when a worker's output lands in the repo: CONTEXT.md is a glossary and nothing else, ADRs go to `docs/adr/NNNN-slug.md`, research notes are one cited Markdown file, and architecture reports go to the temp folder.
 
 ## Setup and errors
 

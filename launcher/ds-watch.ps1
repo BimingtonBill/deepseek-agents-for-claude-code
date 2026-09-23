@@ -14,9 +14,10 @@
     -Run <run>        waits until that run ends, then prints its state, turns, tokens and report.
 
   <lead> and <run> are run ids (research-003-x.1) or task ids (research-003-x, meaning its newest
-  attempt). Runs are read from the manifest: -StateDir, else $env:DS_STATE_DIR, else
-  <current folder>\local\agents. Stopping a watcher does not stop the worker; use
-  tools/ds_status.ps1 -Stop <label> for that.
+  attempt). Runs are read from the manifest: -StateDir, else the launcher's state-dir rule
+  (launcher/ds-state.ps1): DS_STATE_DIR, the current folder's "stateDir", then <current
+  folder>\local\agents, then the shared ~\.claude-deepseek\agents. Stopping a watcher does not stop the
+  worker; use tools/ds_status.ps1 -Stop <label> for that.
 
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File ds-watch.ps1 -Children lead-001-project-audit
@@ -37,7 +38,8 @@ $utf8 = New-Object System.Text.UTF8Encoding $false
 try { [Console]::OutputEncoding = $utf8 } catch { }
 if (-not $Children -and -not $Run) { [Console]::Error.WriteLine('[ds-watch] pass -Children <lead> or -Run <run>'); exit 2 }
 
-if (-not $StateDir) { $StateDir = if ($env:DS_STATE_DIR) { $env:DS_STATE_DIR } else { Join-Path (Get-Location).Path 'local\agents' } }
+# -StateDir is the caller's own override; without one, ask for the launcher's rule for the current folder.
+if (-not $StateDir) { $StateDir = & (Join-Path $PSScriptRoot 'ds-state.ps1') -Dir (Get-Location).Path }
 $manifest = Join-Path $StateDir 'manifest.jsonl'
 $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
 $watchStart = Get-Date

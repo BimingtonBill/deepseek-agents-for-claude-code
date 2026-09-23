@@ -353,14 +353,11 @@ foreach ($raw in @($config.deny)) { if ($raw) { $denyRules += [string]$raw } }
 $denyRules = @($denyRules | Select-Object -Unique)
 
 # --- Run identity and state ---
-if ($config -and $config.stateDir) {
-    $stateDir = [string]$config.stateDir
-    if ($stateDir -notmatch '^([A-Za-z]:[\\/]|[\\/])') { $stateDir = Join-Path $Dir $stateDir }
-}
-elseif (Test-Path -LiteralPath (Join-Path $Dir 'local')) { $stateDir = Join-Path $Dir 'local\agents' }
-else { $stateDir = Join-Path $HOME '.claude-deepseek\agents' }
-# A worker launched by a DeepSeek lead writes to the lead's manifest, not its own checkout's.
-if ($env:DS_STATE_DIR) { $stateDir = $env:DS_STATE_DIR }
+# The state folder, from the one copy of the rule, launcher/ds-state.ps1: DS_STATE_DIR, the project's
+# "stateDir", then local\agents, then the shared ~\.claude-deepseek\agents. A worker launched by a
+# DeepSeek lead writes to the lead's manifest, not its own checkout's, because that lead set DS_STATE_DIR
+# in this process.
+$stateDir = & (Join-Path $PSScriptRoot 'ds-state.ps1') -Dir $Dir
 $manifestLog = Join-Path $stateDir 'manifest.jsonl'
 
 # A resume continues the run it resumes: same run id, same messaging name (so crosstalk partners can
@@ -796,6 +793,27 @@ finally {
 }
 
 if ($timedOut) {
+    # A killed worker never prints its result (a -p run writes stdout only at the end), so the run used to
+    # end with no report at all and everything it had worked out was lost (review-mp-002-spec.1). Its
+    # transcript is on disk, though: keep the text it had written, newest turn last, marked as partial.
+    $partial = ''
+    if ($state.transcript -and (Test-Path -LiteralPath $state.transcript)) {
+        $texts = @()
+        foreach ($line in [IO.File]::ReadLines($state.transcript)) {
+            if ($line -notmatch '"assistant"') { continue }
+            try { $entry = $line | ConvertFrom-Json } catch { continue }
+            if (-not $entry.message -or $entry.message.role -ne 'assistant') { continue }
+            if ($entry.timestamp -and ([datetime]$entry.timestamp).ToUniversalTime() -lt $started.ToUniversalTime()) { continue }
+            $text = (@($entry.message.content | Where-Object { $_.type -eq 'text' } | ForEach-Object { $_.text }) -join '').Trim()
+            if ($text) { $texts += $text }
+        }
+        $partial = ($texts -join "`n`n")
+    }
+    if ($partial.Trim()) {
+        [IO.File]::WriteAllText($manifest.report,
+            "<!-- $runId ($Kind): $Title -->`n*(partial: the worker was stopped after $TimeoutMinutes minutes)*`n`n" + $partial.Trim() + "`n", $utf8)
+        Note "kept the partial output in $($manifest.report)"
+    }
     Complete-Manifest 'timed_out' "ran longer than $TimeoutMinutes minutes"
     Fail "The worker ran longer than $TimeoutMinutes minutes and was stopped." 3
 }

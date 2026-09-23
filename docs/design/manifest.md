@@ -89,7 +89,11 @@ Fields to know:
   until the run ends.
 
 `state` follows A2A's task states where they fit: `submitted`, `working`, `completed`, `failed`,
-`timed_out`, `canceled`. A record still `working` with no live pid means the launcher itself was killed.
+`timed_out`, `canceled`. A record still `working` with no live pid means the launcher itself was killed. A
+`timed_out` run keeps what the worker had written: a headless run prints nothing until it ends, so the
+launcher rebuilds a partial `report.md` from the transcript and marks it partial (probe
+`websearch-014-partial.1`). The partial can be thin, since it holds only the text the worker wrote between
+tool calls.
 
 ## Reading it
 

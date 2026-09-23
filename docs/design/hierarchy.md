@@ -179,7 +179,9 @@ before the lead finished, and the launcher writes that file on every path that p
 real gap was that nothing tells a lead where a child's report lives, so re-reading one means guessing a
 path.
 
-`ds-spawn.ps1` now prints `(also saved at <state dir>uns\<run id>eport.md)` above each report, using
+`ds-spawn.ps1` now prints `(also saved at <state dir>/runs/<run id>/report.md)` above each report, using
+uns\<run id>
+eport.md)` above each report, using
 the launcher's own state-dir rule.
 
 **Evidence.** `lead-006-report-path.1`: spawned one worker, was given the path, read it with `Read`

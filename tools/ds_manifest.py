@@ -16,6 +16,12 @@ import re
 import sys
 from pathlib import Path
 
+try:                                    # imported as tools.ds_manifest
+    from tools import ds_state
+except ImportError:                     # run as a script from tools/
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import ds_state
+
 def _project_root():
     """The project these tools act on. Run from the DeepSeek Workers harness or the installed skill,
     that is DS_PROJECT or the current folder. Copied into a project's tools/, it is DS_PROJECT or the
@@ -81,24 +87,13 @@ def subject_of(label):
 
 
 def default_manifest(root=None, env=None):
-    """The manifest the launcher writes for this project: DS_STATE_DIR, else the project's stateDir
-    from .deepseek-agents.json, else local/agents if the project has local/, else ~/.claude-deepseek/agents."""
+    """The manifest the launcher writes for this project: the state dir the one rule picks - DS_STATE_DIR,
+    the project's stateDir, local/agents when the project has local/, else ~/.claude-deepseek/agents; see
+    ds_state, and launcher/ds-state.ps1 behind it - plus manifest.jsonl."""
     root = Path(root or ROOT)
-    env = os.environ if env is None else env
-    if env.get('DS_STATE_DIR'):
-        return Path(env['DS_STATE_DIR']) / 'manifest.jsonl'
-    try:
-        state_dir = json.loads((root / '.deepseek-agents.json').read_text(encoding='utf-8')).get('stateDir')
-    except (OSError, ValueError):
-        state_dir = None
-    if state_dir:
-        state_dir = Path(state_dir)
-        return (state_dir if state_dir.is_absolute() else root / state_dir) / 'manifest.jsonl'
-    # The launcher's own rule: local/agents when the project has a local/ folder, else the shared
-    # ~/.claude-deepseek/agents (a fresh project has no local/).
-    if (root / 'local').is_dir():
-        return root / 'local' / 'agents' / 'manifest.jsonl'
-    return Path.home() / '.claude-deepseek' / 'agents' / 'manifest.jsonl'
+    # A caller that passes env (the tests) is asking for that environment's answer, not this process's.
+    state = ds_state.fallback_dir(root, env) if env is not None else ds_state.state_dir(root)
+    return state / 'manifest.jsonl'
 
 
 def load_runs(path):

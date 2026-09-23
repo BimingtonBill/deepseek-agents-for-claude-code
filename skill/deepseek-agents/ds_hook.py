@@ -17,6 +17,28 @@ import re
 import sys
 from pathlib import Path
 
+
+def _adapter_dir():
+    """The tools folder holding ds_state.py, the Python door to the launcher's state-dir rule. In the
+    harness this hook is skill/deepseek-agents/ds_hook.py, with tools/ two folders up; installed as part
+    of the skill it sits beside tools/ instead."""
+    here = Path(__file__).resolve().parent
+    for folder in (here.parents[1] / 'tools', here / 'tools'):
+        if (folder / 'ds_state.py').is_file():
+            return folder
+    return None
+
+
+_ADAPTER = _adapter_dir()
+if _ADAPTER is not None:
+    sys.path.insert(0, str(_ADAPTER))
+    try:                                # a broken adapter must not stop the hook: the tool call goes through
+        import ds_state
+    except ImportError:
+        ds_state = None
+else:
+    ds_state = None
+
 WATCH = Path(__file__).resolve().parent / 'ds-watch.ps1'
 
 
@@ -27,21 +49,16 @@ def arg(cmd, name):
 
 
 def state_dir(cmd, cwd):
-    """Where the launcher will keep the manifest, by its own rule: DS_STATE_DIR, the project's stateDir,
-    local/agents when local/ exists, else ~/.claude-deepseek/agents."""
+    """Where the launcher will keep the manifest, by its own rule (tools/ds_state.py, and behind it
+    launcher/ds-state.ps1): DS_STATE_DIR, the project's stateDir, local/agents when local/ exists, else
+    ~/.claude-deepseek/agents. DS_STATE_DIR written into the command itself is not the rule's - it is the
+    value the launched process really gets - so the command is read for it first."""
     m = re.search(r'DS_STATE_DIR\s*=\s*(?:"([^"]+)"|\'([^\']+)\'|([^\s;]+))', cmd)
     if m:
         return next(g for g in m.groups() if g)
-    project = Path(arg(cmd, 'Dir') or cwd)
-    try:
-        configured = json.loads((project / '.deepseek-agents.json').read_text(encoding='utf-8')).get('stateDir')
-    except (OSError, ValueError, AttributeError):
-        configured = None
-    if configured:
-        return str(project / configured) if not os.path.isabs(configured) else configured
-    if (project / 'local').is_dir():
-        return str(project / 'local' / 'agents')
-    return str(Path.home() / '.claude-deepseek' / 'agents')
+    if ds_state is None:
+        raise RuntimeError('ds_state.py not found beside this hook or two folders up')
+    return str(ds_state.state_dir(Path(arg(cmd, 'Dir') or cwd)))
 
 
 def main():
