@@ -204,11 +204,14 @@ if (-not $key) { $key = [Environment]::GetEnvironmentVariable('DEEPSEEK_API_KEY'
 if (-not $key -and -not $DryRun) { Fail 'DEEPSEEK_API_KEY is not set (checked this process and your user environment variables).' }
 
 # Fail fast on a bad key or an empty balance; otherwise Claude Code retries the rejection for minutes.
+$balanceUsd = $null
 if (-not $DryRun) {
     $keyProblem = $null
     try {
         $balance = Invoke-RestMethod -Uri 'https://api.deepseek.com/user/balance' -Headers @{ Authorization = "Bearer $key" } -TimeoutSec 20
         if ($balance.is_available -eq $false) { $keyProblem = 'Your DeepSeek balance is too low for API calls. Top up at platform.deepseek.com.' }
+        $usd = @($balance.balance_infos | Where-Object { $_.currency -eq 'USD' }) | Select-Object -First 1
+        if ($usd) { $balanceUsd = [double]$usd.total_balance }
     } catch {
         if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401) { $keyProblem = 'DeepSeek rejected DEEPSEEK_API_KEY (401). Check the key.' }
         # Any other failure (network, endpoint change): carry on and let the worker report it.
@@ -455,6 +458,8 @@ $lineage += $runId
 $runDir = Join-Path $stateDir "runs\$runId"
 
 $workerHome = Join-Path $HOME '.claude-deepseek'
+# Spend limits (launcher/ds_spend.py) cover every project, so their folder is per user, not per project.
+$spendDir = if ($env:DS_SPEND_DIR) { $env:DS_SPEND_DIR } else { Join-Path $workerHome 'spend' }
 # A websearch worker starts in an empty folder of its own: Claude Code loads CLAUDE.md and AGENTS.md from
 # the folder it starts in, and a web-facing worker should carry no project instructions or paths.
 $startDir = $Dir
@@ -477,6 +482,42 @@ if ($config -and $config.PSObject.Properties['crosstalk'] -and $config.crosstalk
 if ($NoCrosstalk) { $crosstalkOn = $false }
 if ($Crosstalk) { $crosstalkOn = $true }
 $python = (Get-Command python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+
+# --- Spend limit and pace (launcher/ds_spend.py): the user's daily or weekly DeepSeek budget, and the
+# balance, checked like Claude's own usage limits. A worker that would not fit does not start; one that is
+# running stops at the limit. Before that, spending is paced: when it runs ahead of an even spread over the
+# day or week, workers get lower effort, wait for each other, and coders and leads wait for the pace. ---
+$spendTool = Join-Path $PSScriptRoot 'ds_spend.py'
+$spendOn = $python -and (Test-Path -LiteralPath $spendTool)
+$spendNote = $null; $spendRefused = $false; $spendPlan = $null
+if ($spendOn) {
+    $checkArgs = @($spendTool, '--dir', $spendDir, 'check', '--kind', $Kind, '--json', '--run-id', $runId, '--pid', [string]$PID, '--lineage', $lineage)
+    if ($null -ne $balanceUsd) { $checkArgs += @('--balance', [string]$balanceUsd) }
+    if (-not $DryRun) { $checkArgs += '--claim' }
+    $waitUntil = (Get-Date).AddMinutes(20)
+    $waitNoted = $false
+    while ($true) {
+        $spendRaw = (& $python @checkArgs 2>&1 | Out-String).Trim()
+        try { $spendPlan = $spendRaw | ConvertFrom-Json } catch { Note "the spend check failed, so it is skipped: $spendRaw"; $spendPlan = $null; break }
+        if (-not $spendPlan.wait -or $DryRun) { break }
+        if (-not $waitNoted) { Note "$($spendPlan.lines -join ' ') Waiting for the other DeepSeek workers to finish (up to 20 minutes)."; $waitNoted = $true }
+        Start-Sleep -Seconds 10
+        if ((Get-Date) -gt $waitUntil) { $checkArgs += '--waited' }
+    }
+    if ($spendPlan) {
+        $spendNote = (@($spendPlan.lines) -join ' ').Trim()
+        $spendRefused = -not $spendPlan.ok
+        if ($spendRefused -and -not $DryRun) { Fail $spendNote 4 }
+        if ($spendNote -and -not $spendRefused -and -not $waitNoted) { Note $spendNote }
+        # Easing off: the cap applies even to an explicit -Effort, since the budget is the user's.
+        $order = @('low', 'high', 'max')
+        if ($spendPlan.effort_cap -and $order.IndexOf($Effort) -gt $order.IndexOf([string]$spendPlan.effort_cap)) {
+            Note "effort $Effort runs as $($spendPlan.effort_cap) while DeepSeek spending is ahead of pace"
+            $Effort = [string]$spendPlan.effort_cap
+        }
+        if ($spendPlan.ease -gt 0) { $delegation = [Math]::Max(1, $delegation - 1) }
+    }
+}
 if ($crosstalkOn -and -not $python -and -not $Crosstalk) {
     # On by default only: carry on without it rather than refuse to launch.
     Note 'crosstalk is off for this run: it needs Python on PATH (for ds_mcp.py)'
@@ -590,8 +631,12 @@ if ($webExposed) {
 $note += 'If a tool, compiler, runtime or package your task needs is missing or will not run, stop that part and report it to the lead with what is missing and what it is for. Do not write a substitute for it or switch to a weaker approach to get around it: the lead will ask the user to install it.'
 $shellRules = @($allowRules | Where-Object { $_ -match '^Bash\(' } | ForEach-Object { $_ -replace '^Bash\((.*)\)$', '$1' })
 if ($shellRules) {
-    $note += "Shell commands you may run, and only these (* stands for any arguments): $($shellRules -join '; '). You start in the right folder, so no cd is needed. Plain read-only commands (git status, git log, git diff, grep, ls, sed -n, head, tail, wc) run too, alone or ending in a single | head or | tail. Loops, chains of several commands, awk and inline python -c are refused: write a small script and run it with python instead. A refused command means that exact form is not on the list, not that the tool is missing: use a listed form (for Rust, cargo check or cargo test with your crate) rather than concluding you cannot build or test."
+    $note += "Shell commands you may run, and only these (* stands for any arguments): $($shellRules -join '; '). You start in the right folder, so no cd is needed. Plain read-only commands (git status, git log, git diff, grep, ls, sed -n, head, tail, wc) run too, alone or ending in a single | head or | tail. Loops, chains of several commands, awk and inline python -c are refused: write a small script and run it with python instead. A refused command means that exact form is not on the list, not that the tool is missing: use a listed form (for Rust, cargo check or cargo test with your crate) rather than concluding you cannot build or test. Run builds and tests in the foreground with the Bash timeout raised (up to 600000 ms, ten minutes), so you get the result the moment it finishes. Only a job longer than that goes in the background, and then check on it about once a minute: never sleep for several minutes at a time, because a sleep cannot end early when the build does."
 }
+if ($spendPlan -and $spendPlan.ease -gt 0) {
+    $note += "The user's DeepSeek budget is running ahead of pace. Finish in as few steps as you can: read only what the task needs, don't explore beyond it, and report what you have rather than doing extra checks.$(if ($CanSpawn) { ' Start workers only where they save real work, keep them small, and do small things yourself.' })"
+}
+$note += 'When the task is done, write your report and stop. Leftover steps or budget are not a reason to add checks or extras nobody asked for: an extra step costs the user money and can lose the work you already have.'
 $note += 'Keep your context lean: everything you read stays in it and is paid for again on every later step. Search before you read, read the part of a file you need (offset and limit) rather than the whole of a large one, and cut long command output to what matters (the tail of a build log, the failing tests) instead of printing all of it.'
 $note += 'Finish with a short report for the lead: what you did, the files you changed, and anything you could not do or are unsure about.'
 
@@ -649,6 +694,7 @@ $workerEnv = [ordered]@{
     DS_DEPTH                                 = [string]$depth
     DS_MAX_DEPTH                             = [string]$maxDepthHere
     DS_STATE_DIR                             = $stateDir
+    DS_SPEND_DIR                             = $spendDir
     DS_PARENT_MODE                           = $Mode
 }
 if ($webExposed) { $workerEnv['DS_WEB_EXPOSED'] = '1' }
@@ -672,6 +718,7 @@ if ($DryRun) {
     "mode:      $Mode (permission mode $permissionMode), effort $Effort, $MaxTurns turns, ${TimeoutMinutes}m timeout"
     "tools:     $($tools -join ',')"
     "state:     $stateDir"
+    "spend:     $(if (-not $spendOn) { 'not checked (needs Python and ds_spend.py)' } elseif ($spendRefused) { "a real launch would be refused: $spendNote" } else { "within limits ($spendDir)" })"
     foreach ($folder in $readOnlyDirs) { "read-only: $folder" }
     foreach ($rule in $denyRules) { "deny:      $rule" }
     foreach ($rule in $allowRules) { "allow:     $rule" }
@@ -733,6 +780,30 @@ function Complete-Manifest([string]$State, [string]$ErrorText) {
 # Recorded before the worker starts, so a launch that never gets going still leaves a trace.
 Save-Manifest 'submit'
 
+# Runs whose launcher died without recording an end: a state file (removed by every launcher that ends
+# normally) whose worker process is gone. Close each as canceled, so no watcher waits on it for ever.
+foreach ($orphan in @(Get-ChildItem -LiteralPath $stateDir -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+    try {
+        $o = [IO.File]::ReadAllText($orphan.FullName, $utf8) | ConvertFrom-Json
+        if (-not $o.run_id -or -not $o.pid -or $o.run_id -eq $runId -or (Get-Process -Id $o.pid -ErrorAction SilentlyContinue)) { continue }
+        $orphanFile = Join-Path $stateDir "runs\$($o.run_id)\manifest.json"
+        if (Test-Path -LiteralPath $orphanFile) {
+            $om = [IO.File]::ReadAllText($orphanFile, $utf8) | ConvertFrom-Json
+            if ($om.state -eq 'working' -or $om.state -eq 'submitted') {
+                $om.state = 'canceled'
+                $om.ended = (Get-Date).ToString('s')
+                $om.error = "its launcher stopped without recording an end (found by $runId); the worker process $($o.pid) is gone"
+                [IO.File]::WriteAllText($orphanFile, ($om | ConvertTo-Json -Depth 5), $utf8)
+                $line = [ordered]@{ event = 'end'; at = (Get-Date).ToString('s') }
+                foreach ($prop in $om.PSObject.Properties) { $line[$prop.Name] = $prop.Value }
+                [IO.File]::AppendAllText($manifestLog, (($line | ConvertTo-Json -Depth 5 -Compress) + "`n"), $utf8)
+                Note "closed $($o.run_id) as canceled: its launcher died without recording an end"
+            }
+        }
+        Remove-Item -LiteralPath $orphan.FullName -ErrorAction SilentlyContinue
+    } catch { }
+}
+
 # Drop the calling session's provider, auth, session and lineage variables so none reach the worker unset.
 $saved = @{}
 foreach ($var in @(Get-ChildItem Env:)) {
@@ -758,6 +829,7 @@ $env:Path = $pathEntries -join ';'
 $stateFile = Join-Path $stateDir "$label.json"
 $proc = $null
 $exitCode = $null
+$errTail = $null
 $started = Get-Date
 $timedOut = $false
 try {
@@ -771,6 +843,8 @@ try {
     $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
     $psi.StandardOutputEncoding = $utf8
+    $psi.RedirectStandardError = $true
+    $psi.StandardErrorEncoding = $utf8
 
     $proc = [System.Diagnostics.Process]::Start($psi)
 
@@ -789,16 +863,36 @@ try {
     Save-Manifest 'start'
 
     $reading = $proc.StandardOutput.ReadToEndAsync()
+    $readingErr = $proc.StandardError.ReadToEndAsync()
     $bytes = $utf8.GetBytes($prompt)
     $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
     $proc.StandardInput.Close()
 
-    if (-not $proc.WaitForExit($TimeoutMinutes * 60000)) {
+    $deadline = $started.AddMinutes($TimeoutMinutes)
+    $spendStop = $null
+    while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
+        $wait = [Math]::Max(1, [Math]::Min(15000, [int]($deadline - (Get-Date)).TotalMilliseconds))
+        if ($proc.WaitForExit($wait)) { break }
+        if ($spendOn -and (Test-Path -LiteralPath $state.transcript)) {
+            $liveOut = (& $python $spendTool --dir $spendDir live --run-id $runId --transcript $state.transcript `
+                --since $started.ToString('o') --pid $PID --kind $Kind 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -eq 3) { $spendStop = $liveOut; break }
+        }
+    }
+    if (-not $proc.HasExited) {
         & taskkill.exe /PID $proc.Id /T /F | Out-Null
         $timedOut = $true
     } else {
+        $proc.WaitForExit()
         $raw = $reading.Result
         $exitCode = $proc.ExitCode
+        # Pass the worker's own error output on, as before, and keep its last line for the manifest.
+        $errText = [string]$readingErr.Result
+        if ($errText.Trim()) {
+            [Console]::Error.Write($errText)
+            $errTail = @($errText -split "`r?`n" | Where-Object { $_.Trim() -and $_ -notmatch 'unrecognized_model' })[-1]
+            if ($errTail -and $errTail.Length -gt 300) { $errTail = $errTail.Substring(0, 300) }
+        }
     }
 }
 finally {
@@ -816,10 +910,17 @@ finally {
     }
 }
 
-if ($timedOut) {
-    # A killed worker never prints its result (a -p run writes stdout only at the end), so the run used to
-    # end with no report at all and everything it had worked out was lost (review-mp-002-spec.1). Its
-    # transcript is on disk, though: keep the text it had written, newest turn last, marked as partial.
+if ($spendOn -and $state.transcript -and (Test-Path -LiteralPath $state.transcript)) {
+    $spentHere = (& $python $spendTool --dir $spendDir record --run-id $runId --transcript $state.transcript `
+        --since $started.ToString('o') --kind $Kind --effort $Effort --project (Split-Path -Leaf $Dir) 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -eq 0) { $manifest['cost_usd'] = $spentHere.TrimStart('$') }
+}
+
+# A worker that is killed or crashes never prints its result (a -p run writes stdout only at the end), so
+# such a run used to end with no report and everything it had worked out was lost (review-mp-002-spec.1
+# on a timeout, research-542 on a crash). Its transcript is on disk, though: keep the text it had
+# written, newest turn last, marked as partial. Returns whether there was any.
+function Save-PartialReport([string]$Why) {
     $partial = ''
     if ($state.transcript -and (Test-Path -LiteralPath $state.transcript)) {
         $texts = @()
@@ -833,10 +934,17 @@ if ($timedOut) {
         }
         $partial = ($texts -join "`n`n")
     }
-    if ($partial.Trim()) {
-        [IO.File]::WriteAllText($manifest.report,
-            "<!-- $runId ($Kind): $Title -->`n*(partial: the worker was stopped after $TimeoutMinutes minutes)*`n`n" + $partial.Trim() + "`n", $utf8)
-        Note "kept the partial output in $($manifest.report)"
+    if (-not $partial.Trim()) { return $false }
+    [IO.File]::WriteAllText($manifest.report, "<!-- $runId ($Kind): $Title -->`n*(partial: $Why)*`n`n" + $partial.Trim() + "`n", $utf8)
+    Note "kept the partial output in $($manifest.report)"
+    return $true
+}
+
+if ($timedOut) {
+    [void](Save-PartialReport "the worker was stopped $(if ($spendStop) { "at the spend limit: $spendStop" } else { "after $TimeoutMinutes minutes" })")
+    if ($spendStop) {
+        Complete-Manifest 'canceled' "stopped at the spend limit: $spendStop"
+        Fail "The worker was stopped because $spendStop. Its partial report is in $($manifest.report). Finish this work yourself or ask the user to raise the limit." 4
     }
     Complete-Manifest 'timed_out' "ran longer than $TimeoutMinutes minutes"
     Fail "The worker ran longer than $TimeoutMinutes minutes and was stopped." 3
@@ -846,9 +954,12 @@ if ($timedOut) {
 $parsed = $null
 try { $parsed = $raw | ConvertFrom-Json } catch { }
 if (-not $parsed -or -not $parsed.PSObject.Properties['session_id']) {
-    if ($raw -and $raw.Trim()) { Write-Output $raw.TrimEnd(); [IO.File]::WriteAllText($manifest.report, $raw, $utf8) }
-    Complete-Manifest 'failed' "exit code $exitCode without a readable result"
-    Fail "The worker exited with code $exitCode without a readable result." ([Math]::Max($exitCode, 1))
+    $why = if ($errTail) { " ($errTail)" } else { '' }
+    $kept = $false
+    if ($raw -and $raw.Trim()) { Write-Output $raw.TrimEnd(); [IO.File]::WriteAllText($manifest.report, $raw, $utf8); $kept = $true }
+    else { $kept = Save-PartialReport "the worker crashed (exit code $exitCode$why) before it could report; this is what it had written" }
+    Complete-Manifest 'failed' "exit code $exitCode without a readable result$why"
+    Fail "The worker exited with code $exitCode without a readable result$why.$(if ($kept) { " What it had written is in $($manifest.report)." })" ([Math]::Max($exitCode, 1))
 }
 
 if ($null -eq $parsed.result -or '' -eq $parsed.result) { $reportText = '(the worker returned no report text)' }

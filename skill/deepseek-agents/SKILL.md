@@ -133,6 +133,17 @@ Workers run for minutes; a launch that leaves you idle until the report arrives 
 - writing the design or contract for the phase after this one;
 - housekeeping: handoff notes, the queue file, the manifest, commits of finished work.
 
+**Plan three tracks, not one queue.** Before a batch, sort the work into three tracks that run side by side, and say all three in the same message:
+- **Coders**, limited by builds (memory, disk, a build freeze during a long conversion): as many at once as the project allows (`leadCoders`, usually one), back to back.
+- **Read-only workers** (research, review, websearch, analysis): they build nothing, so memory limits and build freezes don't apply to them. Keep this track busy beside the coders with research for the next briefs and a review of each coder that lands.
+- **Claude's own part** (the list above).
+
+One coder at a time is not one worker at a time. When the coder track is blocked, the other two keep going. In OpenSkyrim (2026-09-22..24), only one worker ran for 59% of the time any worker ran, and during a long overnight conversion every worker ran one after another, all of them coders.
+
+**Review each coder as it lands.** When `ds_impl.ps1` reports acceptance PASS, it prints a ready review command. From delegation level 3, start that review and the next coder in the same message, and integrate after reading the review; spot-check what you integrate. The review costs cents and runs in time the next coder needs anyway, while reviewing every diff yourself costs your time and Claude tokens (OpenSkyrim: 78 coders, 8 review workers).
+
+**A question to the user doesn't park the work.** When you ask the user something, keep doing everything the answer doesn't change, and say what you're doing meanwhile. Only the work that depends on the answer waits. In OpenSkyrim, a message ending "One question is still waiting on you" was followed by 108 minutes with nothing started while a worker ran.
+
 **Keep read-only workers out of your scratch.** A research worker with the whole project readable will read `local/impl/*` worktrees and live logs and mix them up with the real tree (stress test 2: one attributed numbers to the wrong build from file times). Put `local/**` in the project's `denyRead`, or add `-DenyEdit`-style read limits for the run, and name the exact files it should read in the brief.
 
 **Keep apart from a running worker:** anything in a file a running worker owns; a build in a shared output folder a worker is building into (see the target/ rule above); an acceptance run of a worktree still being written. Running the game, the GPU or a physical device stays serial.
@@ -272,6 +283,17 @@ Each project has a delegation level from 1 to 5 that says how much of the work g
 | 5 | Everything: Claude only orchestrates; every task, even small edits and lookups, goes to a worker unless it needs this conversation, a GUI or the user. |
 
 At **every** level Claude keeps the conversation with the user, design decisions, integration, security-sensitive changes, and review of every worker result it acts on. The dial moves work, not the quality bar. When the user says "use workers more" or "less", or names a number, set it with `ds_delegation.py --set <1-5> --agents-md` from the project folder (`--global` sets their default for all projects) and say what changed.
+
+## Spend limits
+
+The user can cap DeepSeek spend per day, per week, or both, across all their projects, like Claude's own usage limits. A worker then doesn't start when the limit is used up or when what its kind usually costs won't fit in what's left, and a running worker is stopped when the limit is reached, keeping a partial report. The launcher exits with code 4 and says why. **Don't retry a refused worker and don't work around the limit:** do the work yourself, or tell the user and let them decide.
+
+Spending is also **paced** so the limit is rarely hit: the budget is spread evenly over the day or week, plus a 20% head start. While spending runs ahead of that pace, the launcher eases off in steps and says so in its output: lower effort and a note to the worker to finish in few steps; then effort low and one worker at a time (a new worker waits for the others to finish); then no coders or leads until spending is back on pace (the refusal says when). `ds_delegation.py --brief` also reports the level one lower meanwhile; work at that level. When you see "easing off", prefer fewer, smaller briefs and do small things yourself. The same happens when the DeepSeek balance is below what the worker usually costs.
+
+- `python "$HOME/.claude/skills/deepseek-agents/ds_spend.py" status` shows what has been spent today and this week, what is left, and when it resets. Check it before a big fan-out.
+- `... ds_spend.py set 2 --per day` (or `--per week`) sets a limit when the user asks; `... ds_spend.py off` removes it.
+
+Costs are worked out from the worker transcripts at DeepSeek's list prices, so they are estimates; the DeepSeek dashboard has the real bill. An estimate for a kind is the average of its last 20 runs.
 
 ## Working with the Matt Pocock skills
 

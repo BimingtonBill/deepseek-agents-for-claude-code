@@ -120,6 +120,19 @@ together, handles anything security-sensitive, and **checks every piece of DeepS
 - *"Set the DeepSeek delegation level to 4 for this project."*
 - *"Make DeepSeek delegation 2 my default for all projects."*
 
+## Keeping costs down: spend limits
+
+You can give DeepSeek a budget, per day or per week, covering all your projects. It works like Claude's usage limits: before each worker starts, the kit checks what you've spent and what that kind of worker usually costs. If it won't fit, the worker doesn't start and Claude does the work itself. A worker that's running when you hit the limit is stopped, and whatever it had found is kept. The limit resets at midnight, or on Monday for a weekly one (or, if you ask for it to count from now, on the weekday you set it).
+
+It also paces the spending so you rarely hit the limit at all, a bit like cruise control. The budget is spread evenly over the day (or week), with a head start so the morning isn't held back. If spending gets ahead of that pace, workers ease off step by step: less thinking effort, then one worker at a time, then no big coding jobs until the pace catches up. Claude also hands off a little less while it's ahead of pace. It also checks your DeepSeek balance, so workers don't start when your credit can't cover them.
+
+There's no limit until you set one. Just tell Claude, for example:
+
+- *"Limit DeepSeek to $2 a day."*
+- *"How much DeepSeek have I used today?"*
+
+The spend figures are estimates, worked out from token counts at DeepSeek's list prices, so the DeepSeek dashboard is the real bill.
+
 ## Is it safe?
 
 - **Workers only see the project you point them at.** They can't see your Claude account, your chats or

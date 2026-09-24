@@ -106,3 +106,29 @@ python tools/ds_manifest.py --legacy <runs.csv> --briefs <tasks/deepseek>   # an
 
 Run it from the project folder, or set `DS_PROJECT`. It reads the same manifest the launcher writes: `DS_STATE_DIR` if
 set, else the project's `stateDir` from `.deepseek-agents.json`, else `local/agents`; `--manifest` overrides.
+
+## Crashes and dead launchers (2026-09-24)
+
+The OpenSkyrim night of 2026-09-23 showed two gaps. `research-542` finished its work, opened one more
+large image and died with exit code 1: the partial-report rescue ran only for timeouts, so its report
+was lost. `impl-152`'s launcher died (the machine ran out of memory) and the run stayed `working` for
+ever, so a watcher would have waited on it indefinitely.
+
+- A crash now keeps a partial report too (`Save-PartialReport`, shared with the timeout path), and the
+  launcher captures the worker's error output and puts its last line in the manifest's `error`.
+- Every launch closes runs whose launcher died: a state file (`<state dir>/<label>.json`, removed by
+  every launcher that ends normally) whose worker process is gone. Its manifest becomes `canceled`, with
+  an `end` event in `manifest.jsonl`, and the state file is removed.
+
+Evidence: `probe-034-crash` was killed 13 s in (taskkill of the worker process). The launcher printed
+"kept the partial output" and "What it had written is in ...report.md"; the report starts "*(partial:
+the worker crashed (exit code 1) before it could report ...)*" followed by the worker's part 1. The same
+launch found a planted `probe-033-orphan` (state file with pid 999999, manifest `working`), printed
+"closed probe-033-orphan.1 as canceled", and its manifest reads `canceled`, "its launcher stopped
+without recording an end (found by probe-034-crash.1); the worker process 999999 is gone".
+
+Two instructions were added to every worker's prompt from the same night: run builds and tests in the
+foreground with the Bash timeout raised (coders slept 3-9 minutes at a time waiting on background
+builds; `impl-525` slept about 37 of its 46 minutes), and stop once the task is done (`research-542`
+crashed on an extra check it began because it "had budget"). These are guidance; the next night's runs
+will show whether they hold.

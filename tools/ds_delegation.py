@@ -190,6 +190,27 @@ def write_agents_md(project, level):
     return path
 
 
+PACED_NOTE = (" (lowered from %d while DeepSeek spending runs ahead of the pace for the user's spend limit; "
+              "ds_spend.py status shows it)")
+
+
+def paced_level(level):
+    """One level lower while spending runs ahead of pace (launcher/ds_spend.py), else the level itself.
+    ds_spend.py sits in launcher/ here and in the skill folder once installed."""
+    here = Path(__file__).resolve().parent
+    for folder in (here.parent / 'launcher', here.parent):
+        if (folder / 'ds_spend.py').is_file():
+            sys.path.insert(0, str(folder))
+            try:
+                import ds_spend
+                return ds_spend.lowered(level, ds_spend.spend_dir())
+            except Exception:  # a broken spend record must never stop Claude reading its level
+                return level
+            finally:
+                sys.path.remove(str(folder))
+    return level
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--project', default=str(_project_root()))
@@ -213,10 +234,12 @@ def main(argv=None):
     level, source = effective(project)
     if args.agents_md:
         print('wrote the level-%d rules into %s' % (level, write_agents_md(project, level)))
+    paced = paced_level(level)
+    note = PACED_NOTE % level if paced != level else ''
     if args.brief:
-        print(describe(level))
+        print(describe(paced) + note)
         return 0
-    print('%s\n(from %s)\n\n%s' % (describe(level), source, ALWAYS))
+    print('%s\n(from %s)%s\n\n%s' % (describe(paced), source, note, ALWAYS))
     if source == 'environment variable' and args.set is not None:
         print('\nNote: %s (or the older %s) is set and overrides the value just written.' % (ENV, LEGACY_ENV))
     return 0

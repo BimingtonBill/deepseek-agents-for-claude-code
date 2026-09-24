@@ -362,3 +362,12 @@ $row = '{0},{1},implementation,{2},{3},{4},{5},{6},{7},{8},,,' -f $started.ToStr
 
 "[ds-impl] ${Name}: worker $status, acceptance $(if ($accepted) { 'PASS' } else { 'FAIL' }). Review: git -C '$work' diff"
 if (-not $accepted) { exit 1 }
+
+# Keep the tracks busy: the next coder can start (this one's build is done), and a read-only review of
+# this one runs beside it, since it builds nothing. OpenSkyrim ran 78 coders and 8 reviews in three days
+# (2026-09-22..24), with one worker at a time for 59% of the time workers ran.
+$reviewLabel = 'review-' + ($Name -replace '^impl-', '')
+$reviewTask = "Review coder task $Name. Its brief: $briefPath. Its work is in the git worktree $work; the changed files are $($touched -join ', '). Check that the change does what the brief asks and nothing more, stays in its owned files, and is covered by its tests, and look for what the acceptance commands would miss. Read-only: report findings with file:line and a verdict (accept, fix first, or reject); do not fix anything."
+"[ds-impl] next, in one message: start the next coder now, and this DeepSeek review of $Name beside it (read-only, so build limits don't apply):"
+"  powershell -NoProfile -ExecutionPolicy Bypass -File `"$agent`" -Kind review -Mode read -Effort high -Dir `"$root`" -Label $reviewLabel -Task `"$reviewTask`""
+"[ds-impl] integrate $Name after reading the review; meanwhile do your own part (the next brief, integration wiring, checks of earlier work)."
