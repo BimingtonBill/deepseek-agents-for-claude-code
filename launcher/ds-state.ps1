@@ -35,7 +35,9 @@ try {
         try {
             $configPath = Join-Path $project '.deepseek-agents.json'
             if (Test-Path -LiteralPath $configPath) {
-                $config = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                # UTF-8, as tools/ds_state.py reads it: PowerShell 5.1 would otherwise use the ANSI code page for a
+                # file without a BOM (audit finding SDR-20260924-06).
+                $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                 $configured = [string]$config.stateDir
             }
         } catch { $configured = $null }
@@ -46,7 +48,8 @@ try {
 
     # 3. The project's own agents folder, 4. or the shared one.
     if (-not $stateDir) {
-        if (Test-Path -LiteralPath (Join-Path $project 'local')) { $stateDir = Join-Path $project 'local\agents' }
+        # A folder, not any item named local (audit finding SDR-20260924-02; tools/ds_state.py uses is_dir()).
+        if (Test-Path -LiteralPath (Join-Path $project 'local') -PathType Container) { $stateDir = Join-Path $project 'local\agents' }
         else { $stateDir = Join-Path $HOME '.claude-deepseek\agents' }
     }
 } catch {

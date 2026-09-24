@@ -52,13 +52,17 @@ def fallback_dir(project=None, env=None):
     project = Path(project) if project is not None else Path.cwd()
     env = os.environ if env is None else env
     if env.get('DS_STATE_DIR'):
-        return Path(env['DS_STATE_DIR'])
+        # The script makes it absolute with GetFullPath (audit finding SDR-20260924-05).
+        return Path(os.path.abspath(env['DS_STATE_DIR']))
     try:
         configured = json.loads((project / '.deepseek-agents.json').read_text(encoding='utf-8')).get('stateDir')
     except (OSError, ValueError, AttributeError):
         configured = None
     if configured:
-        configured = Path(configured)
+        # The script stringifies whatever is there ({"stateDir": 123} -> <project>\123); do the same rather
+        # than raise (audit finding SDR-20260924-01).
+        # PowerShell's [string] joins a list with spaces (audit finding SDR-20260924-04).
+        configured = Path(' '.join(map(str, configured)) if isinstance(configured, list) else str(configured))
         return configured if configured.is_absolute() else project / configured
     if (project / 'local').is_dir():
         return project / 'local' / 'agents'

@@ -19,6 +19,13 @@ Good worker tasks are self-contained and checkable: map or summarize part of a c
 
 Keep for yourself: design and architecture decisions, ambiguous requirements, security-sensitive code, anything that needs this conversation's context, and anything quicker to do than to brief.
 
+**Work in parallel as often as possible, with DeepSeek workers and Claude subagents both.** Whenever the work splits into independent parts, run the parts at once rather than one after another, and use both kinds of helper to get there: DeepSeek workers (this skill) and Claude subagents (the Agent tool). Treat them as equally capable: any task can go to either, so choose by what gets more running at once, not by how hard the task is.
+- **DeepSeek workers** cost cents, so they are the first choice while the DeepSeek budget allows.
+- **Claude subagents** add more lanes beside them (use `model: "sonnet"` for most work, `"haiku"` for quick lookups, the Explore agent for read-only code search), and take over the lanes DeepSeek can't fill: when the spend limit or pacing holds workers, when coders must go one at a time because of builds, or when a DeepSeek launch is refused.
+- **You** plan, integrate, review what comes back and keep the conversation; do your own part while the helpers run.
+
+Never serialise work because one kind of helper is limited: add the other kind. Aim to have several helpers running whenever there is independent work, and say in each batch message what runs in parallel.
+
 ## 0. Check the tools before planning
 
 Before you plan or delegate, check that the tools the job needs are installed: compilers, runtimes, package managers and libraries. Use this skill's checker, not `which`:
@@ -133,14 +140,15 @@ Workers run for minutes; a launch that leaves you idle until the report arrives 
 - writing the design or contract for the phase after this one;
 - housekeeping: handoff notes, the queue file, the manifest, commits of finished work.
 
-**Plan three tracks, not one queue.** Before a batch, sort the work into three tracks that run side by side, and say all three in the same message:
+**Plan four tracks, not one queue.** Before a batch, sort the work into tracks that run side by side, and say them all in the same message:
 - **Coders**, limited by builds (memory, disk, a build freeze during a long conversion): as many at once as the project allows (`leadCoders`, usually one), back to back.
 - **Read-only workers** (research, review, websearch, analysis): they build nothing, so memory limits and build freezes don't apply to them. Keep this track busy beside the coders with research for the next briefs and a review of each coder that lands.
+- **Claude subagents** as more lanes for any of the above, and for whatever DeepSeek can't run right now (see "Work in parallel as often as possible" above).
 - **Claude's own part** (the list above).
 
-One coder at a time is not one worker at a time. When the coder track is blocked, the other two keep going. In OpenSkyrim (2026-09-22..24), only one worker ran for 59% of the time any worker ran, and during a long overnight conversion every worker ran one after another, all of them coders.
+One coder at a time is not one worker at a time. When the coder track is blocked, the others keep going. In OpenSkyrim (2026-09-22..24), only one worker ran for 59% of the time any worker ran, and during a long overnight conversion every worker ran one after another, all of them coders.
 
-**Review each coder as it lands.** When `ds_impl.ps1` reports acceptance PASS, it prints a ready review command. From delegation level 3, start that review and the next coder in the same message, and integrate after reading the review; spot-check what you integrate. The review costs cents and runs in time the next coder needs anyway, while reviewing every diff yourself costs your time and Claude tokens (OpenSkyrim: 78 coders, 8 review workers).
+**Review each coder as it lands.** When `ds_impl.ps1` reports acceptance PASS, it prints a ready review command. From delegation level 3, start that review and the next coder in the same message, and integrate after reading the review; spot-check what you integrate. The review costs cents and runs in time the next coder needs anyway, while reviewing every diff yourself costs your time and Claude tokens (OpenSkyrim: 78 coders, 8 review workers). `-Integrate` prints a short checklist first (acceptance, scope, the review verdict, pitfalls, docs) and refuses work whose last recorded acceptance failed unless you pass `-Force`.
 
 **A question to the user doesn't park the work.** When you ask the user something, keep doing everything the answer doesn't change, and say what you're doing meanwhile. Only the work that depends on the answer waits. In OpenSkyrim, a message ending "One question is still waiting on you" was followed by 108 minutes with nothing started while a worker ran.
 
@@ -286,14 +294,26 @@ At **every** level Claude keeps the conversation with the user, design decisions
 
 ## Spend limits
 
-The user can cap DeepSeek spend per day, per week, or both, across all their projects, like Claude's own usage limits. A worker then doesn't start when the limit is used up or when what its kind usually costs won't fit in what's left, and a running worker is stopped when the limit is reached, keeping a partial report. The launcher exits with code 4 and says why. **Don't retry a refused worker and don't work around the limit:** do the work yourself, or tell the user and let them decide.
+The user can cap DeepSeek spend per day, per week, or both, across all their projects, like Claude's own usage limits. A worker then doesn't start when the limit is used up or when what its kind usually costs won't fit in what's left, and a running worker is stopped when the limit is reached, keeping a partial report. The launcher exits with code 4 and says why. **Don't retry a refused worker and don't work around the limit:** do the work yourself, or tell the user and let them decide. **When the user isn't there to decide (an overnight or unattended run), keep working yourself:** take the held tasks on to your usual standard, in parallel where they are independent, with Claude subagents doing the parts that don't need you, keep using the cheap read-only workers that still run, and try a coder again after the time the refusal gives. Never sit idle waiting for the pace, and never raise the limit yourself.
 
 Spending is also **paced** so the limit is rarely hit: the budget is spread evenly over the day or week, plus a 20% head start. While spending runs ahead of that pace, the launcher eases off in steps and says so in its output: lower effort and a note to the worker to finish in few steps; then effort low and one worker at a time (a new worker waits for the others to finish); then no coders or leads until spending is back on pace (the refusal says when). `ds_delegation.py --brief` also reports the level one lower meanwhile; work at that level. When you see "easing off", prefer fewer, smaller briefs and do small things yourself. The same happens when the DeepSeek balance is below what the worker usually costs.
 
 - `python "$HOME/.claude/skills/deepseek-agents/ds_spend.py" status` shows what has been spent today and this week, what is left, and when it resets. Check it before a big fan-out.
 - `... ds_spend.py set 2 --per day` (or `--per week`) sets a limit when the user asks; `... ds_spend.py off` removes it.
+- `... ds_spend.py set 1.5 --per run` caps what any one worker may cost: it is told to wrap up at 75% and stopped at the cap, keeping a partial report. A stopped worker's report says what is done; brief what is left as smaller tasks rather than relaunching the same brief. For one task that genuinely needs more, pass `-MaxCost <dollars>` to the launcher and say why.
 
 Costs are worked out from the worker transcripts at DeepSeek's list prices, so they are estimates; the DeepSeek dashboard has the real bill. An estimate for a kind is the average of its last 20 runs.
+
+## Project memory, nudges and the morning report
+
+**Project memory.** Two short files in the project's state folder go into every worker's brief, so it doesn't explore from scratch: a **map** (layout, entry points, key types, build and test commands, traps) for every kind except websearch, and **pitfalls** (mistakes workers made here before, as rules) for coders, leads and reviewers. Both are written by cheap digest workers (a few cents each). **Keeping them current is always your job, at every delegation level from 2:** at the start of a session, and whenever the morning report says memory is due, run `python "$HOME/.claude/skills/deepseek-agents/tools/ds_memory.py" due` from the project folder and start every command it prints, in the background, before planning other worker launches. It briefs a map when there is none or it is 40+ commits or two weeks behind, and pitfalls once 5 reviews have come in since the last update (3 for a first list); the launcher saves each when it ends. `... ds_memory.py status` shows how old each is.
+- When you reject or fix a worker's work yourself, add the lesson at once, for free: `... ds_memory.py note "<a rule a coder can follow>"`.
+
+**Standing audits.** Instead of writing a fresh review brief each time, each important area of the project can have a standing checklist (`memory/checklists/<area>.md`): the invariants a change there must keep, each anchored on real symbols with the test that guards it, plus a security section. `python "$HOME/.claude/skills/deepseek-agents/tools/ds_audit.py" init` briefs a digest worker to propose the areas and first checklists (the launcher saves them). After that, `... ds_audit.py due` briefs an audit only for the areas whose code changed since their last audit, and prints the commands: run them in the background like any review. Each audit files what it confirms as numbered findings (`ESM-20260925-03`) that stay open until a later audit reports them fixed or you run `... ds_audit.py close <id>`, and adds new invariants it discovers to the checklist. `... ds_audit.py findings` lists what's open; brief coders from it. Run `due` when the morning report says audits are due, and before a release. For numbers that should only change on purpose (records parsed, cells converted, test counts), `... ds_audit.py baseline record <name> -- <command>` keeps the command's output, and `baseline check <name>` shows what moved.
+
+**Nudges.** The launcher watches each running worker and, the first time it drifts, tells it so after its next tool call: at 100, 150 and 200 steps; at 200k and 350k tokens of context; when the same command form is refused three times; and when it sleeps for minutes. The launcher prints `nudged the worker: <what>`. A nudged worker is told to wrap up and report what is done and what is left, so expect a shorter report with a list of what remains, and brief the rest as new, smaller tasks.
+
+**Morning report.** When a session starts in a project where workers ran since the last report, you get a few lines as context: what failed or got stuck, long runs, time spent sleeping, spend against the limit, and whether the memory is due. Read the full report (its path is given) before planning, act on what needs attention, and mention anything the user should know. `python "$HOME/.claude/skills/deepseek-agents/tools/ds_morning.py"` gives the full report at any time.
 
 ## Working with the Matt Pocock skills
 

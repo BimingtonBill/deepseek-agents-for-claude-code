@@ -112,6 +112,34 @@ def text(result, error=False):
     return {'content': [{'type': 'text', 'text': result}], 'isError': error}
 
 
+def brief_name_ok(brief):
+    """A brief name is <kind>-<nnn>-<slug> and nothing else: no path, so it can only mean a file in
+    BRIEF_DIR."""
+    return bool(re.fullmatch(r'(%s)-\d{3}-[a-z0-9][a-z0-9-]{1,60}' % '|'.join(KINDS), brief))
+
+
+def content_problem(brief, content):
+    """Why this brief can't run as written, or None. Checked by write_brief, and again by spawn_workers,
+    since a lead with edit rights could change the file in between (audit finding HAC-20260924-01)."""
+    if len(content) < 80 or '# Goal' not in content:
+        return 'the brief needs at least a # Goal section and enough detail to stand alone'
+    if brief.startswith('impl-'):
+        if not IMPL:
+            return 'coders are not available here (tools/ds_impl.ps1 was not found)'
+        if not re.search(r'(?m)^\s*Owned files:\s*\S', content) or not re.search(r'(?m)^\s*Acceptance:\s*\S', content):
+            return ('an impl brief needs a line "Owned files: path/a, path/b" (the files the coder may '
+                    'change, relative to the project root) and a line "Acceptance: <command>" (a test '
+                    'command such as cargo test -p crate or python -m unittest discover -s tests)')
+        return None
+    runs = commands_in(content)
+    if runs:
+        return ('this worker will be read-only with no shell, so it cannot run: %s. Rewrite the '
+                'brief to ask for reading, searching and analysis instead; if you only mean to name '
+                'a command as background, write it without backticks. Work that must run commands '
+                'belongs in an impl- brief (a coder in its own worktree) or with Claude.' % ', '.join(runs))
+    return None
+
+
 def call(name, args):
     if name == 'wait_for_messages' and 'wait' in ENABLED:
         seconds = max(1, min(60, int(args.get('seconds') or 15)))
@@ -121,7 +149,7 @@ def call(name, args):
         brief = str(args.get('name') or '').strip()
         if brief.endswith('.md'):
             brief = brief[:-3]
-        if not re.fullmatch(r'(%s)-\d{3}-[a-z0-9][a-z0-9-]{1,60}' % '|'.join(KINDS), brief):
+        if not brief_name_ok(brief):
             return text('name must be <kind>-<nnn>-<slug> in lower case (e.g. research-001-rc-rule), kind one of %s' % ', '.join(KINDS), True)
         # The run id is <name>.<attempt>, counted across the whole manifest. A name used before would run
         # as .2 or later, and a sibling told "<name>.1" could not reach it (probe lead-006-watch-probe.1).
@@ -129,23 +157,9 @@ def call(name, args):
             return text('the name %s was already used by an earlier run, so it would not run as %s.1; '
                         'choose another name' % (brief, brief), True)
         content = str(args.get('content') or '')
-        if len(content) < 80 or '# Goal' not in content:
-            return text('the brief needs at least a # Goal section and enough detail to stand alone', True)
-        if brief.startswith('impl-'):
-            if not IMPL:
-                return text('coders are not available here (tools/ds_impl.ps1 was not found)', True)
-            if not re.search(r'(?m)^\s*Owned files:\s*\S', content) or not re.search(r'(?m)^\s*Acceptance:\s*\S', content):
-                return text('an impl brief needs a line "Owned files: path/a, path/b" (the files the coder may '
-                            'change, relative to the project root) and a line "Acceptance: <command>" (a test '
-                            'command such as cargo test -p crate or python -m unittest discover -s tests)', True)
-        if not brief.startswith('impl-'):
-            runs = commands_in(content)
-            if runs:
-                return text('this worker will be read-only with no shell, so it cannot run: %s. Rewrite the '
-                            'brief to ask for reading, searching and analysis instead; if you only mean to name '
-                            'a command as background, write it without backticks. Work that must run commands '
-                            'belongs in an impl- brief (a coder in its own worktree) or with Claude.'
-                            % ', '.join(runs), True)
+        problem = content_problem(brief, content)
+        if problem:
+            return text(problem, True)
         BRIEF_DIR.mkdir(parents=True, exist_ok=True)
         path = BRIEF_DIR / (brief + '.md')
         path.write_text(content, encoding='utf-8')
@@ -154,9 +168,18 @@ def call(name, args):
         names = [str(b).strip().removesuffix('.md') for b in (args.get('briefs') or []) if str(b).strip()]
         if not names:
             return text('no briefs given', True)
+        # Names only, as write_brief made them: a path here would launch any .md file on disk as a brief,
+        # past every check write_brief makes (audit finding HAC-20260924-01).
+        bad = [n for n in names if not brief_name_ok(n)]
+        if bad:
+            return text('not brief names: %s. Pass the names write_brief saved (<kind>-<nnn>-<slug>), not paths' % ', '.join(bad), True)
         missing = [n for n in names if not (BRIEF_DIR / (n + '.md')).exists()]
         if missing:
             return text('not saved with write_brief yet: %s' % ', '.join(missing), True)
+        for n in names:
+            problem = content_problem(n, (BRIEF_DIR / (n + '.md')).read_text(encoding='utf-8', errors='replace'))
+            if problem:
+                return text('%s has changed since write_brief saved it and no longer passes: %s' % (n, problem), True)
         coders = [n for n in names if n.startswith('impl-')]
         readers = [n for n in names if n not in coders]
         cap = _max_coders()

@@ -122,7 +122,10 @@ def state_dir(cmd, cwd):
     launcher/ds-state.ps1): DS_STATE_DIR, the project's stateDir, local/agents when local/ exists, else
     ~/.claude-deepseek/agents. DS_STATE_DIR written into the command itself is not the rule's - it is the
     value the launched process really gets - so the command is read for it first."""
-    m = re.search(r'DS_STATE_DIR\s*=\s*(?:"([^"]+)"|\'([^\']+)\'|([^\s;]+))', cmd)
+    # Only an assignment that starts a command segment (bash VAR=value prefixes, export, or PowerShell's
+    # $env:), never the same text inside an argument (audit finding SDR-20260924-03).
+    m = re.search(r'(?:^|&&|\|\||;|\n)\s*(?:(?:export\s+)?(?:[A-Za-z_][A-Za-z_0-9]*=\S*\s+)*|\$env:)DS_STATE_DIR\s*=\s*'
+                  r'(?:"([^"]+)"|\'([^\']+)\'|([^\s;]+))', cmd)
     if m:
         return next(g for g in m.groups() if g)
     if ds_state is None:
@@ -130,8 +133,31 @@ def state_dir(cmd, cwd):
     return str(ds_state.state_dir(Path(arg(cmd, 'Dir') or cwd)))
 
 
+def session_start(event):
+    """The short morning report, as context for a session that opens in a project where workers ran
+    since the last report. Silent everywhere else."""
+    import subprocess
+    cwd = event.get('cwd') or os.getcwd()
+    here = Path(__file__).resolve().parent
+    # tools/ beside this file once installed; the harness keeps it two folders up.
+    morning = next((p for p in (here / 'tools' / 'ds_morning.py', here.parents[1] / 'tools' / 'ds_morning.py') if p.is_file()), None)
+    if not morning or not (Path(cwd) / 'local').is_dir() and not os.environ.get('DS_STATE_DIR'):
+        return
+    try:
+        done = subprocess.run([sys.executable, str(morning), '--project', cwd, '--short'], capture_output=True,
+                              text=True, encoding='utf-8', errors='replace', timeout=12)
+    except (OSError, subprocess.SubprocessError):
+        return
+    text = done.stdout.strip()
+    if done.returncode == 0 and text:
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': text}}))
+
+
 def main():
     event = json.load(sys.stdin)
+    if event.get('hook_event_name') == 'SessionStart':
+        session_start(event)
+        return
     if event.get('tool_name') not in ('Bash', 'PowerShell'):
         return
     tool_input = event.get('tool_input') or {}
@@ -211,13 +237,35 @@ def install(settings_path=None):
     # Hook commands run in Git Bash or PowerShell; a bare first word works in both, a quoted path only in bash.
     runner = 'python' if shutil.which('python') else ('py' if shutil.which('py') else Path(sys.executable).as_posix())
     command = '%s "%s"' % (runner, Path(__file__).resolve().as_posix())
+    if not isinstance(settings, dict) or not isinstance(settings.get('hooks', {}), dict):
+        print('hook not registered: %s does not hold a settings object (audit finding WLH-20260924-01)' % path)
+        return 1
     hooks = settings.setdefault('hooks', {})
-    for event in ('PreToolUse', 'PostToolUse'):
-        kept = [g for g in hooks.get(event, []) if not any('ds_hook.py' in str(h.get('command', '')) for h in g.get('hooks', []))]
-        kept.append({'matcher': 'Bash|PowerShell', 'hooks': [{'type': 'command', 'command': command, 'timeout': 10}]})
-        hooks[event] = kept
+
+    def without_ours(groups):
+        # Drop only this hook's own entries: a group the user also put other hooks in keeps them
+        # (audit finding WORKERLA-20260924-01: whole groups used to be dropped).
+        out = []
+        for g in groups if isinstance(groups, list) else []:
+            if not isinstance(g, dict) or not isinstance(g.get('hooks'), list):
+                out.append(g)             # not ours to judge: keep it exactly as it was
+                continue
+            entries = [h for h in g['hooks'] if not (isinstance(h, dict) and 'ds_hook.py' in str(h.get('command', '')))]
+            if entries:
+                out.append(dict(g, hooks=entries))
+            elif not g['hooks']:
+                out.append(g)
+        return out
+
+    for event, matcher, timeout in (('PreToolUse', 'Bash|PowerShell', 10), ('PostToolUse', 'Bash|PowerShell', 10),
+                                    ('SessionStart', 'startup|resume', 15)):
+        hooks[event] = without_ours(hooks.get(event, [])) + [
+            {'matcher': matcher, 'hooks': [{'type': 'command', 'command': command, 'timeout': timeout}]}]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2) + '\n', encoding='utf-8')
+    # Through a temp file, so an interrupted write can't leave the user's settings half-written (review-049).
+    tmp = path.with_name(path.name + '.ds-hook.tmp')
+    tmp.write_text(json.dumps(settings, indent=2) + '\n', encoding='utf-8')
+    os.replace(str(tmp), str(path))
     print('registered the DeepSeek lead hook in %s (new sessions pick it up)' % path)
     return 0
 

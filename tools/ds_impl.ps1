@@ -92,11 +92,26 @@ function Set-TaskTarget([string]$Worktree, [switch]$Seed) {
     if (-not $Seed -or $NoSeed -or -not (Test-Path $leadTarget)) { return }
     # Every profile the lead has built (debug, release, ...), so a release acceptance is warm too (H3).
     foreach ($profile in Get-ChildItem $leadTarget -Directory | Where-Object { $_.Name -ne 'tmp' -and -not (Test-Path (Join-Path $target $_.Name)) }) {
+        # A profile cargo is building right now holds its .cargo-lock: its files are half-written, so a copy
+        # would be no use and robocopy would hit locked files. Leave that profile cold.
+        $cargoLock = Join-Path $profile.FullName '.cargo-lock'
+        if (Test-Path -LiteralPath $cargoLock) {
+            $busy = $false
+            try { $held = [IO.File]::Open($cargoLock, 'Open', 'ReadWrite', 'None'); $held.Close() } catch { $busy = $true }
+            if ($busy) { "[ds-impl] not seeding target/$($profile.Name): a cargo build is writing it now; that build will be cold"; continue }
+        }
         $t0 = Get-Date
-        & robocopy.exe $profile.FullName (Join-Path $target $profile.Name) /E /MT:16 /XD incremental /NFL /NDL /NJH /NJS /NP | Out-Null
-        # robocopy exits 0-7 on success, 8+ on failure.
-        if ($LASTEXITCODE -ge 8) { "[ds-impl] seeding target/$($profile.Name) failed (robocopy $LASTEXITCODE); that build will be cold" }
-        else { "[ds-impl] seeded target/$($profile.Name) from the lead's build in $([int]((Get-Date) - $t0).TotalSeconds) s" }
+        # /R:0 /W:0: a locked file is skipped, not retried. robocopy's defaults (/R:1000000 /W:30) turned one
+        # file held by the lead's own build into a 50-minute stall (OpenSkyrim impl-166, 2026-09-24). The seed
+        # is only a warm cache: cargo rebuilds whatever is missing.
+        $out = @(& robocopy.exe $profile.FullName (Join-Path $target $profile.Name) /E /MT:16 /R:0 /W:0 /XD incremental /NFL /NDL /NJH /NJS /NP)
+        $code = $LASTEXITCODE
+        $skipped = @($out | Where-Object { $_ -match 'ERROR \d+ \(0x' }).Count   # one such line per file not copied
+        $secs = [int]((Get-Date) - $t0).TotalSeconds
+        # robocopy: 0-7 copied, 8 some files could not be copied, 16 nothing could be done.
+        if ($code -ge 16) { "[ds-impl] seeding target/$($profile.Name) failed (robocopy $code); that build will be cold" }
+        elseif ($code -ge 8) { "[ds-impl] seeded target/$($profile.Name) in $secs s, skipping $skipped file(s) that were in use; cargo rebuilds those" }
+        else { "[ds-impl] seeded target/$($profile.Name) from the lead's build in $secs s" }
         $global:LASTEXITCODE = 0
     }
 }
@@ -105,6 +120,27 @@ function Fail([string]$m) { [Console]::Error.WriteLine("[ds-impl] $m"); exit 2 }
 function Split-List([string]$v) {
     if (-not $v) { return @() }
     @($v -split ',(?![^()]*\))' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+$pilotHeader = 'started,task,type,base,status,scope_ok,checks_passed,checks_total,seconds,outcome,reviewer,lead_minutes,notes'
+# Appends $Row to pilot.csv, keeping the header and every other row. With -Dedupe, any earlier row
+# for $Task is dropped first, so a re-run of -Post for the same task replaces its old row instead of
+# piling up near-duplicates that differ only by timestamp/seconds. Written atomically: temp file, then
+# a rename over the target, so a reader never sees a half-written file.
+function Write-PilotRow([string]$Row, [string]$Task, [switch]$Dedupe) {
+    New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+    $lines = if (Test-Path -LiteralPath $pilotLog) {
+        @([IO.File]::ReadAllText($pilotLog) -split "`r?`n" | Where-Object { $_ -ne '' })
+    } else { @() }
+    $header = if ($lines.Count -gt 0) { $lines[0] } else { $pilotHeader }
+    $dataLines = if ($lines.Count -gt 1) { $lines[1..($lines.Count - 1)] } else { @() }
+    if ($Dedupe -and $Task) {
+        $dataLines = @($dataLines | Where-Object { ($_ -split ',')[1] -ne $Task })
+    }
+    $dataLines += $Row
+    $content = (@($header) + $dataLines -join "`r`n") + "`r`n"
+    $tmp = "$pilotLog.tmp$PID"
+    [IO.File]::WriteAllText($tmp, $content, (New-Object System.Text.UTF8Encoding $false))
+    Move-Item -LiteralPath $tmp -Destination $pilotLog -Force
 }
 
 if ($List) {
@@ -136,6 +172,62 @@ if ($Integrate) {
     $meta = Join-Path $path '.ds-impl.json'
     if (-not (Test-Path $meta)) { Fail "no such task: $Integrate" }
     $info = Get-Content $meta -Raw | ConvertFrom-Json
+
+    # Completeness gate: what is already known about this task on disk, printed before anything is
+    # copied (docs/todo.md #13). Only a failed acceptance blocks (pass -Force to override); the rest
+    # is information, since a missing review or missing docs is not proof either way.
+    $pilotRows = @()
+    if (Test-Path -LiteralPath $pilotLog) {
+        $pilotRows = @(Import-Csv -LiteralPath $pilotLog | Where-Object { $_.task -eq $Integrate })
+    }
+    $lastRow = if ($pilotRows.Count -gt 0) { $pilotRows[$pilotRows.Count - 1] } else { $null }
+    if ($lastRow) {
+        "[ds-impl] check: acceptance - $($lastRow.checks_passed)/$($lastRow.checks_total) checks passed, outcome=$($lastRow.outcome)"
+        $scopeNote = if ($lastRow.scope_ok -eq 'True') { 'ok' } elseif ($lastRow.scope_ok -eq 'False') { 'NOT ok' } else { 'not recorded' }
+        "[ds-impl] check: scope - $scopeNote"
+    } else {
+        "[ds-impl] check: acceptance - no pilot.csv row found for $Integrate; nothing recorded to check"
+    }
+    $acceptanceFailed = $lastRow -and ($lastRow.outcome -in @('failed', 'launch-failed'))
+    if ($acceptanceFailed -and -not $Force) {
+        Fail "$Integrate's last recorded acceptance did not pass (outcome=$($lastRow.outcome)); refusing to integrate broken work. Fix it and re-run -Post $Integrate, or pass -Force to copy it anyway: -Integrate $Integrate -Force"
+    }
+    # Every coder ds_impl runs leaves a row, so none means its acceptance was never checked here. Don't let
+    # that pass as clean (OpenSkyrim audit finding HT-20260924-04): check it first, or say so with -Force.
+    if (-not $lastRow -and -not $Force) {
+        Fail "no acceptance is recorded for $Integrate, so nothing says it works. Run its checks first (-Post $Integrate), or pass -Force to copy it anyway: -Integrate $Integrate -Force"
+    }
+
+    $reviewName = $Integrate -replace '^impl-', ''
+    $reviewRoot = Join-Path $stateDir 'runs'
+    $reviewReport = $null
+    if (Test-Path -LiteralPath $reviewRoot) {
+        $reviewReport = Get-ChildItem $reviewRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq "review-$reviewName" -or $_.Name -like "review-$reviewName.*" } |
+            Sort-Object LastWriteTime -Descending |
+            ForEach-Object { Join-Path $_.FullName 'report.md' } |
+            Where-Object { Test-Path -LiteralPath $_ } |
+            Select-Object -First 1
+    }
+    if ($reviewReport) {
+        # Prefer an inline "Verdict: accept" style line over a bare "## Verdict" heading, which
+        # carries no verdict itself (the templates put the actual word on the line below it).
+        $verdictLines = @(Get-Content -LiteralPath $reviewReport | Where-Object { $_ -match 'Verdict' })
+        $verdictLine = ($verdictLines | Where-Object { $_ -match 'Verdict\s*[:\-]\s*\S' } | Select-Object -First 1)
+        if (-not $verdictLine -and $verdictLines.Count -gt 0) { $verdictLine = $verdictLines[0] }
+        if ($verdictLine) { "[ds-impl] check: review - $($verdictLine.ToString().Trim())" }
+        else { "[ds-impl] check: review - report at $reviewReport has no line mentioning Verdict; read it yourself" }
+    } else {
+        "[ds-impl] check: review - no review worker ran; review the diff yourself"
+    }
+
+    $pitfalls = Join-Path $stateDir 'memory\pitfalls.md'
+    if (Test-Path -LiteralPath $pitfalls) { "[ds-impl] check: pitfalls - check the diff against $pitfalls" }
+
+    $docFiles = @($info.files | Where-Object { $_ -match '\.md$' })
+    if ($docFiles) { "[ds-impl] check: docs - $($docFiles -join ', ')" }
+    else { "[ds-impl] check: docs - none of the owned files are docs; user-facing changes may still need docs" }
+
     $copied = @()
     $moved = @()
     foreach ($file in $info.files) {
@@ -150,7 +242,9 @@ if ($Integrate) {
         # files the worker did not own, which is why nobody was watching them.
         if (-not $Force -and (Test-Path -LiteralPath $to)) {
             $sinceBase = @(& git -C $root diff --name-only "$($info.base)" -- $file 2>$null)
-            if ($sinceBase) { $moved += $file; continue }
+            # If git can't compare (the base commit is gone after a rebase), treat the file as changed rather
+            # than overwrite master's version unchecked (review-049).
+            if ($LASTEXITCODE -ne 0 -or $sinceBase) { $moved += $file; $global:LASTEXITCODE = 0; continue }
         }
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $to) | Out-Null
         Copy-Item -LiteralPath $from -Destination $to -Force
@@ -237,6 +331,22 @@ if ($fromLead) {
 $baseCommit = (& git -C $root rev-parse $Base).Trim()
 $work = Join-Path $implRoot $Name
 
+# Size check before any money is spent. How big the owned files are predicts a coder's length far better
+# than how many there are or how long the brief is: over 38 OpenSkyrim coders (2026-09), under 4,000
+# owned lines took a median of about 95 steps, 4,000-8,000 took 124 (69% over 100), and over 8,000 took
+# 186 (94% over 100). Every step re-reads the context, so those long runs cost the most.
+$ownedLines = 0
+foreach ($file in $owned) {
+    $full = Join-Path $root $file
+    if (Test-Path -LiteralPath $full -PathType Leaf) { $ownedLines += @([IO.File]::ReadAllLines($full)).Count }
+}
+$sizeNote = if ($ownedLines -gt 8000) {
+    "$ownedLines lines in owned files: coders this size took a median of 186 steps (94% went over 100). Split the task, or name the functions or line ranges to change so the coder reads only those."
+} elseif ($ownedLines -gt 4000) {
+    "$ownedLines lines in owned files: coders this size took a median of 124 steps (69% went over 100). Consider splitting it, or point the brief at the exact functions to change."
+} else { $null }
+if ($sizeNote) { "[ds-impl] size: $sizeNote" }
+
 if ($DryRun) {
     "project:  $root$(if ($inHarness) { ' (run from the harness)' } elseif ($inSkill) { ' (run from the installed skill)' } else { ' (tools in the project)' })"
     "launcher: $agent"
@@ -245,6 +355,7 @@ if ($DryRun) {
     "worktree: $work"
     "owned:    $($owned -join ', ')"
     "accept:   $($checks -join ' | ')"
+    "size:     $ownedLines lines in owned files$(if (-not $sizeNote) { ' (small enough)' })"
     exit 0
 }
 
@@ -311,14 +422,9 @@ $status = if ($footer -match 'status=(\S+)') { $Matches[1] } else { 'unknown' }
 # the acceptance builds then only costs minutes and records a misleading FAIL against an untouched
 # checkout (reported by the OpenSkyrim session, 2026-09-22), so stop and say what happened.
 if (-not $footer) {
-    New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
-    if (-not (Test-Path $pilotLog)) {
-        [IO.File]::WriteAllText($pilotLog, "started,task,type,base,status,scope_ok,checks_passed,checks_total,seconds,outcome,reviewer,lead_minutes,notes`r`n",
-            (New-Object System.Text.UTF8Encoding $false))
-    }
     $row = '{0},{1},implementation,{2},no-worker,,0,{3},{4},launch-failed,,,the launcher returned no worker result; acceptance skipped' -f `
         $started.ToString('s'), $Name, $baseCommit.Substring(0, 7), $checks.Count, [int]((Get-Date) - $started).TotalSeconds
-    [IO.File]::AppendAllText($pilotLog, $row + "`r`n", (New-Object System.Text.UTF8Encoding $false))
+    Write-PilotRow -Row $row -Task $Name -Dedupe:([bool]$Post)
     "[ds-impl] ${Name}: the worker did not run (no result from the launcher; its errors are above). Acceptance skipped."
     "[ds-impl] fix the launch problem, then -Discard $Name and run the task again."
     exit 1
@@ -350,15 +456,12 @@ foreach ($check in $checks) {
 }
 $accepted = ($results.Count -gt 0 -and -not ($results | Where-Object { $_.Exit -ne 0 }) -and -not $outside)
 
-New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
-if (-not (Test-Path $pilotLog)) {
-    [IO.File]::WriteAllText($pilotLog, "started,task,type,base,status,scope_ok,checks_passed,checks_total,seconds,outcome,reviewer,lead_minutes,notes`r`n",
-        (New-Object System.Text.UTF8Encoding $false))
-}
 $row = '{0},{1},implementation,{2},{3},{4},{5},{6},{7},{8},,,' -f $started.ToString('s'), $Name, $baseCommit.Substring(0, 7),
     $status, (-not $outside), @($results | Where-Object { $_.Exit -eq 0 }).Count, $results.Count,
     [int]((Get-Date) - $started).TotalSeconds, $(if ($accepted) { 'pending-review' } else { 'failed' })
-[IO.File]::AppendAllText($pilotLog, $row + "`r`n", (New-Object System.Text.UTF8Encoding $false))
+# -Post re-runs these checks against an already-recorded task with no new worker run: replace that
+# task's earlier row instead of adding a duplicate that differs only by timestamp/seconds (docs/todo.md #4).
+Write-PilotRow -Row $row -Task $Name -Dedupe:([bool]$Post)
 
 "[ds-impl] ${Name}: worker $status, acceptance $(if ($accepted) { 'PASS' } else { 'FAIL' }). Review: git -C '$work' diff"
 if (-not $accepted) { exit 1 }

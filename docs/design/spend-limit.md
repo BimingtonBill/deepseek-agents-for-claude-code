@@ -51,6 +51,16 @@ lock (`pace.lock`) makes workers started together, such as a lead's `spawn_worke
 check and claim their place. Step 3 can only happen in the first half of a window: later, a ratio
 of 1.5 is already past the limit itself, and the hard limit takes over.
 
+## Cap per worker
+
+`ds_spend.py set <dollars> --per run` (or the launcher's `-MaxCost` for one run) caps a single worker's
+own spend, checked in the same 15-second loop: at 75% it queues a wrap-up nudge (delivered by the
+worker's ds_steer.py hook, recorded in steer.json as `cost`), and at the cap it stops the worker through
+the spend-stop path (partial report, `canceled`, exit 4). Chosen over a time limit: of 157 runs, the 22
+over 30 minutes were mostly coders that finished (19 of 22), and time is a poor proxy for cost
+(impl-525 ran 46 minutes for $0.15, mostly asleep on builds). At $1.50, 8 of 157 runs would have been
+stopped.
+
 ## Limits of the design
 
 - The check runs every 15 seconds, so a worker can overshoot by up to 15 seconds of spend (well under a
@@ -81,3 +91,10 @@ of 1.5 is already past the limit itself, and the hard limit takes over.
   10-second check). `ds_delegation.py --brief` read "level 3 ... (lowered from 4 while DeepSeek spending
   runs ahead of the pace ...)" against that spend folder and level 4 without it. Step 3 is covered by
   the unit tests only: at 13:00 it cannot occur (see above).
+- Cap per worker: `probe-046-cap-stop` (`-MaxCost 0.004`) was stopped at the first 15-second check,
+  16 s in, `canceled`, partial report kept. `probe-047-cap-nudge` (`-MaxCost 0.011`) went from under 75%
+  to over the cap between two checks, so it was stopped at 31 s without its nudge: with a cap that small
+  one check can skip the nudge. `ds_spend.py live` run on 047's own transcript with a 0.014 cap wrote the
+  nudge, and `ds_steer.py deliver` handed it over (delivery to a live worker: probe-038). At the real
+  $1.50 cap a late, large worker spends about $0.03 per 15 seconds, so the nudge at $1.12 comes many
+  checks before the stop.

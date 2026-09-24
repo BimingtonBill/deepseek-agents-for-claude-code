@@ -100,6 +100,9 @@ param(
     # read the web (or whose lead has) may edit only inside an isolated git worktree.
     [switch]$WebEdit,
     # Show the command, policy and environment instead of running the worker.
+    # Stop this worker once it has cost this many dollars (a nudge to wrap up comes at 75%). Overrides the
+    # user's cap per worker (ds_spend.py set <dollars> --per run) for this run.
+    [double]$MaxCost = 0,
     [switch]$DryRun
 )
 
@@ -299,6 +302,13 @@ if ($isWebsearch) {
     $allowRules += 'WebSearch'
     # The open web unless -WebDomains narrows it.
     if (-not $WebDomains) { $allowRules += 'WebFetch' }
+}
+# A websearch worker reads untrusted pages, so it keeps its web tools only: -AllowTools cannot hand it file or
+# shell tools (audit finding WLP-20260924-03).
+if ($isWebsearch) {
+    $dropped = @($allowRules | Where-Object { $_ -notmatch '^\s*Web(Fetch|Search)\b' })
+    if ($dropped) { Note "a websearch worker gets web tools only; ignored: $($dropped -join ', ')" }
+    $allowRules = @($allowRules | Where-Object { $_ -match '^\s*Web(Fetch|Search)\b' })
 }
 $ownWeb = @($allowRules | Where-Object { $_ -match '^\s*Web(Fetch|Search)\b' })
 if ($ownWeb) {
@@ -575,7 +585,9 @@ foreach ($cmd in $briefCommands) {
     if (-not $ok) { $unrunnable += $cmd }
 }
 if ($unrunnable) {
-    Note "the brief names commands this worker may not run: $($unrunnable -join '; '). Add -AllowTools rules for them (or project allowTools), or change the brief."
+    if ($label -notmatch '^(audit-|digest-(map|pitfalls|checklists)$)') {
+        Note "the brief names commands this worker may not run: $($unrunnable -join '; '). Add -AllowTools rules for them (or project allowTools), or change the brief."
+    }
 }
 
 # --- Settings written for this run: reads fenced to the working directories, plus the deny rules ---
@@ -587,6 +599,15 @@ if ($allowRules) { $permissions['allow'] = @($allowRules) }
 $settings = @{ permissions = $permissions }
 # Messages from sibling workers must be delivered: a -p session cannot show the approval dialog.
 $settings['crossSessionInbound'] = if ($crosstalkOn) { 'accept' } else { 'refuse' }
+# Nudges (launcher/ds_steer.py): the launcher queues a message when the worker starts to drift (100
+# steps, a large context, the same command refused again and again, long sleeps), and this hook hands it
+# to the worker after its next tool call.
+$steerTool = Join-Path $PSScriptRoot 'ds_steer.py'
+$steerOn = $python -and (Test-Path -LiteralPath $steerTool)
+if ($steerOn) {
+    $hookCommand = '"{0}" "{1}" deliver --run-dir "{2}"' -f ($python -replace '\\', '/'), ($steerTool -replace '\\', '/'), ($runDir -replace '\\', '/')
+    $settings['hooks'] = @{ PostToolUse = @(@{ matcher = '*'; hooks = @(@{ type = 'command'; command = $hookCommand; timeout = 10 }) }) }
+}
 
 $leadName = if ($Parent) { "the DeepSeek lead $Parent" } else { 'Claude' }
 $note = @(
@@ -622,7 +643,7 @@ if ($SubAgents) {
     $note += 'You may use the Agent tool to start subagents for independent parts of your task. Give each a complete brief, run independent ones in parallel, check what they return, and merge it into your own report.'
 }
 if ($CanSpawn) {
-    $note += "You are a lead at depth ${depth}: you may split your task across DeepSeek workers of your own. Save one brief per worker with the write_brief tool (name <kind>-<slug>, kind one of research, analysis, review, critic, digest, websearch; a websearch worker searches the web and cannot see any files, so put everything it needs in its brief and nothing private; sections # Goal, # Context, # Scope, # Done when, # Report). A worker sees only its brief, never your conversation, so each must stand alone. Then call spawn_workers once with all the names: it runs them in parallel in your working directory, waits, and returns each report under its run id (<name>.1). For code, write impl-<nnn>-<slug> briefs (one coder per call unless the project allows more; a coder may own protected source, since it works in its own worktree): each coder works in its own git worktree under local/impl/<name>, never in your folder. Its brief must say what to build and include the lines 'Owned files: a, b' (the only files it may change, relative to the project root) and 'Acceptance: <test command>' (for example cargo test -p crate or python -m unittest discover -s tests); give coders files that do not overlap. You get back its scope check and test results; read its changed files under local/impl/<name> to review them. You cannot merge a coder's work: list each coder's task name, what it changed and your verdict in your report, and Claude reviews and integrates it. Their reports come to you, not to Claude: check the claims that matter, then fold them into your own report, citing run ids. Use workers only for parts that are genuinely independent; do small things yourself. Size the work to the task, because every worker and every round costs time: a simple lookup is one short websearch brief with effort low and max_turns about 10, and should come back within a minute. One round is the norm. A websearch worker already cross-checks its sources, so accept its report unless two reports conflict or a claim looks wrong, and never start a separate round just to re-verify. For a list of items, give each item its own small worker (four photos means four websearch workers, one photo each) so they run in parallel, instead of one worker working through several. Websearch workers check the direct links they report themselves, so don't start a worker to re-check another worker's links. spawn_workers waits for the slowest worker, so keep briefs even in size."
+    $note += "You are a lead at depth ${depth}: you may split your task across DeepSeek workers of your own. Save one brief per worker with the write_brief tool (name <kind>-<slug>, kind one of research, analysis, review, critic, digest, websearch; a websearch worker searches the web and cannot see any files, so put everything it needs in its brief and nothing private; sections # Goal, # Context, # Scope, # Done when, # Report). A worker sees only its brief, never your conversation, so each must stand alone. Then call spawn_workers once with all the names: it runs them in parallel in your working directory, waits, and returns each report under its run id (<name>.1). For code, write impl-<nnn>-<slug> briefs (one coder per call unless the project allows more; a coder may own protected source, since it works in its own worktree): each coder works in its own git worktree under local/impl/<name>, never in your folder. Its brief must say what to build and include the lines 'Owned files: a, b' (the only files it may change, relative to the project root) and 'Acceptance: <test command>' (for example cargo test -p crate or python -m unittest discover -s tests); give coders files that do not overlap. You get back its scope check and test results; read its changed files under local/impl/<name> to review them. You cannot merge a coder's work: list each coder's task name, what it changed and your verdict in your report, and Claude reviews and integrates it. Their reports come to you, not to Claude: check the claims that matter, then fold them into your own report, citing run ids. A report over 6,000 characters comes back as its start and end with the path of the full report: Read only the parts you need to check, since everything you take in is re-read on every later step. Use workers only for parts that are genuinely independent; do small things yourself. Size the work to the task, because every worker and every round costs time: a simple lookup is one short websearch brief with effort low and max_turns about 10, and should come back within a minute. One round is the norm. A websearch worker already cross-checks its sources, so accept its report unless two reports conflict or a claim looks wrong, and never start a separate round just to re-verify. For a list of items, give each item its own small worker (four photos means four websearch workers, one photo each) so they run in parallel, instead of one worker working through several. Websearch workers check the direct links they report themselves, so don't start a worker to re-check another worker's links. spawn_workers waits for the slowest worker, so keep briefs even in size."
 }
 if ($webExposed) {
     $registries = if ($ownWeb -and $verifyDomains) { " You may fetch $(@($verifyDomains | Where-Object { $_ }) -join ', ') to check claims about packages and versions." } else { '' }
@@ -740,6 +761,27 @@ if ($mcpConfigFile) { [IO.File]::WriteAllText($mcpConfigFile, ($mcpConfig | Conv
 # A resume keeps the original brief and saves the follow-up beside it.
 $briefCopy = if ($resumed) { "brief-resume-$resumes.md" } else { 'brief.md' }
 [IO.File]::WriteAllText((Join-Path $runDir $briefCopy), $prompt, $utf8)
+
+# --- Project memory (tools/ds_memory.py): a map of the project, so a worker needn't explore it first,
+# and pitfalls learned from reviews, for the kinds that change or judge code. Not for web-facing or test
+# kinds, not on a resume (the session has it already), and not for the digest that rewrites it. ---
+$memoryDir = Join-Path $stateDir 'memory'
+$memoryNotes = @()
+if (-not $resumed -and $Kind -notin @('websearch', 'probe', 'selftest') -and $label -notmatch '^digest-(map|pitfalls)') {
+    $mapFile = Join-Path $memoryDir 'map.md'
+    if (Test-Path -LiteralPath $mapFile) {
+        $mapText = [IO.File]::ReadAllText($mapFile, $utf8).Trim()
+        if ($mapText.Length -gt 12000) { $mapText = $mapText.Substring(0, 12000) + "`n(map cut short)" }
+        $memoryNotes += "## Project map`n`nKept for workers so you needn't explore first. It may lag the code: where it and the files differ, trust the files.`n`n$mapText"
+    }
+    $pitfallsFile = Join-Path $memoryDir 'pitfalls.md'
+    if ($Kind -in @('impl', 'lead', 'review', 'critic', 'task') -and (Test-Path -LiteralPath $pitfallsFile)) {
+        $pitText = [IO.File]::ReadAllText($pitfallsFile, $utf8).Trim()
+        if ($pitText.Length -gt 5000) { $pitText = $pitText.Substring(0, 5000) + "`n(list cut short)" }
+        $memoryNotes += "## Pitfalls in this project`n`nMistakes workers have made here before. $(if ($Kind -in @('review', 'critic')) { 'Check the work for these.' } else { 'Avoid them.' })`n`n$pitText"
+    }
+}
+if ($memoryNotes) { $prompt = $prompt.TrimEnd() + "`n`n---`n`n" + ($memoryNotes -join "`n`n") + "`n" }
 
 # --- Manifest: runs/<run id>/manifest.json holds the latest state; manifest.jsonl gets one line per event ---
 $manifest = [ordered]@{
@@ -873,9 +915,15 @@ try {
     while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
         $wait = [Math]::Max(1, [Math]::Min(15000, [int]($deadline - (Get-Date)).TotalMilliseconds))
         if ($proc.WaitForExit($wait)) { break }
+        if ($steerOn -and (Test-Path -LiteralPath $state.transcript)) {
+            $fired = @(& $python $steerTool watch --transcript $state.transcript --since $started.ToString('o') --run-dir $runDir 2>$null)
+            foreach ($key in $fired) { if ($key) { Note "nudged the worker: $key" } }
+        }
         if ($spendOn -and (Test-Path -LiteralPath $state.transcript)) {
-            $liveOut = (& $python $spendTool --dir $spendDir live --run-id $runId --transcript $state.transcript `
-                --since $started.ToString('o') --pid $PID --kind $Kind 2>&1 | Out-String).Trim()
+            $liveArgs = @($spendTool, '--dir', $spendDir, 'live', '--run-id', $runId, '--transcript', $state.transcript,
+                '--since', $started.ToString('o'), '--pid', [string]$PID, '--kind', $Kind, '--run-dir', $runDir)
+            if ($MaxCost -gt 0) { $liveArgs += @('--run-cap', [string]$MaxCost) }
+            $liveOut = (& $python @liveArgs 2>&1 | Out-String).Trim()
             if ($LASTEXITCODE -eq 3) { $spendStop = $liveOut; break }
         }
     }
@@ -944,7 +992,7 @@ if ($timedOut) {
     [void](Save-PartialReport "the worker was stopped $(if ($spendStop) { "at the spend limit: $spendStop" } else { "after $TimeoutMinutes minutes" })")
     if ($spendStop) {
         Complete-Manifest 'canceled' "stopped at the spend limit: $spendStop"
-        Fail "The worker was stopped because $spendStop. Its partial report is in $($manifest.report). Finish this work yourself or ask the user to raise the limit." 4
+        Fail "The worker was stopped because $spendStop. Its partial report is in $($manifest.report). Brief what is left as smaller tasks, finish it yourself, or ask the user to raise the limit." 4
     }
     Complete-Manifest 'timed_out' "ran longer than $TimeoutMinutes minutes"
     Fail "The worker ran longer than $TimeoutMinutes minutes and was stopped." 3
@@ -1054,6 +1102,27 @@ if ($manifest.transcript -and (Test-Path -LiteralPath $subDir)) {
     $manifest.subagent_tokens_out = $subOut
 }
 if ($parsed.is_error) { Complete-Manifest 'failed' $status } else { Complete-Manifest 'completed' $null }
+
+# A map or pitfalls digest (tools/ds_memory.py) is kept as the project's memory as soon as it ends well.
+if (-not $parsed.is_error -and $label -match '^digest-(map|pitfalls)$' -and $python) {
+    $memoryTool = @((Join-Path (Split-Path -Parent $PSScriptRoot) 'tools\ds_memory.py'), (Join-Path $PSScriptRoot 'tools\ds_memory.py')) |
+        Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($memoryTool) {
+        $kept = (& $python $memoryTool --project $Dir save $Matches[1] $runId 2>&1 | Out-String).Trim()
+        Note $kept
+    }
+}
+# A standing audit (tools/ds_audit.py) files its findings and checklist additions; a checklists digest
+# becomes the first checklists.
+if (-not $parsed.is_error -and $python -and ($label -match '^audit-(.+)$' -or $label -eq 'digest-checklists')) {
+    $auditArea = if ($label -match '^audit-(.+)$') { $Matches[1] } else { $null }
+    $auditTool = @((Join-Path (Split-Path -Parent $PSScriptRoot) 'tools\ds_audit.py'), (Join-Path $PSScriptRoot 'tools\ds_audit.py')) |
+        Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($auditTool) {
+        $saveArgs = if ($auditArea) { @('save', 'audit', $auditArea, $runId) } else { @('save', 'checklists', $runId) }
+        Note ((& $python $auditTool --project $Dir @saveArgs 2>&1 | Out-String).Trim())
+    }
+}
 
 # --- Run log: one row per worker, for cost and turn budgeting (kept for ds_report.py) ---
 try {

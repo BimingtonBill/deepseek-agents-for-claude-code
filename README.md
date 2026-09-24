@@ -126,12 +126,22 @@ You can give DeepSeek a budget, per day or per week, covering all your projects.
 
 It also paces the spending so you rarely hit the limit at all, a bit like cruise control. The budget is spread evenly over the day (or week), with a head start so the morning isn't held back. If spending gets ahead of that pace, workers ease off step by step: less thinking effort, then one worker at a time, then no big coding jobs until the pace catches up. Claude also hands off a little less while it's ahead of pace. It also checks your DeepSeek balance, so workers don't start when your credit can't cover them.
 
+You can also cap what any one worker may cost ("stop any worker at $1.50"): it's told to wrap up as it gets close, and stopped at the cap with what it had found kept. Only about 1 in 20 workers has ever cost that much.
+
 There's no limit until you set one. Just tell Claude, for example:
 
 - *"Limit DeepSeek to $2 a day."*
 - *"How much DeepSeek have I used today?"*
 
 The spend figures are estimates, worked out from token counts at DeepSeek's list prices, so the DeepSeek dashboard is the real bill.
+
+## It learns and adjusts as it goes
+
+- **A map of your project for every worker.** A cheap worker writes a short guide to where things are in your project, and every worker gets it with its task, so it doesn't spend steps (and money) exploring first. It's refreshed when the code has moved on.
+- **Lessons from reviews.** Mistakes that reviews catch are collected into a short "pitfalls" list that every coder reads before starting, so the same mistakes stop coming back.
+- **A tap on the shoulder.** If a worker starts to drift (running long, reading too much, retrying something that's not allowed, or sleeping on a build), it's told so straight away and asked to wrap up.
+- **Standing audits.** Each important part of your project can get a checklist of what must stay true there, and a review worker re-checks only the parts whose code changed. Problems it confirms are kept as numbered items until they're fixed.
+- **A morning report.** When you open Claude after workers ran unattended, Claude gets a short summary of what happened and what needs attention.
 
 ## Is it safe?
 

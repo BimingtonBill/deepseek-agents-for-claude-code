@@ -13,7 +13,9 @@ When it runs ahead, workers ease off in steps (see EASE):
     python ds_spend.py status                  what has been spent, what is left, when it resets
     python ds_spend.py set 2 --per day         limit DeepSeek spend to $2 a day (--per week for a week,
                                                --from-now to ignore what was spent before now)
-    python ds_spend.py off [--per day|week]    remove a limit (both when --per is left out)
+    python ds_spend.py set 1.5 --per run       stop any one worker once it has cost $1.50 (a nudge to wrap
+                                               up comes first, at 75%); ds-agent.ps1 -MaxCost overrides it
+    python ds_spend.py off [--per day|week|run] remove a limit (all of them when --per is left out)
     python ds_spend.py backfill <project> ...  add past runs from those projects to the spend record
 
 ds-agent.ps1 calls the rest itself: check (before a worker starts), live (every 15 seconds while it
@@ -44,6 +46,7 @@ DEFAULT_ESTIMATE = dict(impl=0.70, lead=0.60, analysis=0.40, research=0.25, dige
 FALLBACK_ESTIMATE = 0.30
 PERIODS = ('day', 'week')
 WARN_AT = 0.8          # say so once a limit is this far used
+RUN_NUDGE_AT = 0.75    # tell a worker to wrap up once it has used this much of the cap per worker
 REFUSED = 3            # exit code for "over the limit"
 
 # Pacing. The share of a limit that is "on pace" at a moment is the share of the window gone by, plus
@@ -272,6 +275,28 @@ def check(d, kind, balance=None, now=None):
     return True, lines
 
 
+def holds(d, since):
+    """Launches the limits or the pace refused or made wait since `since`: (refused, waited), each a list
+    of rows, one per run (a waiting run checks every 10 s, so it is counted once)."""
+    refused, waited = [], {}
+    try:
+        lines = (d / 'holds.jsonl').read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return [], []
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(r, dict) or not r.get('at') or parse_time(r['at']) < since:
+            continue
+        if r.get('held') == 'refused':
+            refused.append(r)
+        else:
+            waited.setdefault(r.get('run_id'), r)
+    return refused, list(waited.values())
+
+
 def pace(d, kind, now=None):
     """How far spending is ahead of an even pace: ease 0 (on pace) to 3, the period behind it, and when a
     worker of this kind fits the pace again (None when only the reset will do)."""
@@ -358,6 +383,27 @@ class locked:
                 pass
 
 
+def run_cap_nudge(run_dir, spent_so_far, cap):
+    """Queue one wrap-up nudge for the worker (delivered by its ds_steer.py hook) at RUN_NUDGE_AT of the
+    cap per worker, and note it in steer.json with the others."""
+    run_dir = Path(run_dir)
+    state_file = run_dir / 'steer.json'
+    try:
+        state = json.loads(state_file.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        state = {'nudges': []}
+    if any(n.get('key') == 'cost' for n in state['nudges']):
+        return False
+    text = ('You have cost $%.2f of the $%.2f this task may cost, and each step costs more than the last. Wrap up now: '
+            'finish or back out the change in hand and report what is done and what is left, or you will be stopped '
+            'at $%.2f.' % (spent_so_far, cap, cap))
+    with open(run_dir / 'nudge.txt', 'a', encoding='utf-8') as fh:
+        fh.write(text + '\n')
+    state['nudges'].append(dict(key='cost', at=dt.datetime.now().astimezone().isoformat(timespec='seconds'), text=text))
+    state_file.write_text(json.dumps(state, indent=1), encoding='utf-8')
+    return True
+
+
 def over(d, run_id, now=None):
     """The first limit that running workers and recorded runs together have now reached, or None."""
     lim = limits(d)
@@ -373,10 +419,10 @@ def main(argv=None):
     ap.add_argument('--dir', help='the spend folder (default: DS_SPEND_DIR or ~/.claude-deepseek/spend)')
     sub = ap.add_subparsers(dest='cmd', required=True)
     s = sub.add_parser('status'); s.add_argument('--balance', type=float)
-    s = sub.add_parser('set'); s.add_argument('dollars', type=float); s.add_argument('--per', choices=PERIODS, default='day')
+    s = sub.add_parser('set'); s.add_argument('dollars', type=float); s.add_argument('--per', choices=PERIODS + ('run',), default='day')
     s.add_argument('--from-now', action='store_true', help='count only spending from now on; with --per week, weeks '
                    'also start on today\'s weekday instead of Monday')
-    s = sub.add_parser('off'); s.add_argument('--per', choices=PERIODS)
+    s = sub.add_parser('off'); s.add_argument('--per', choices=PERIODS + ('run',))
     s = sub.add_parser('check'); s.add_argument('--kind', required=True); s.add_argument('--balance', type=float)
     s.add_argument('--json', action='store_true', help='print the plan (pace included) as JSON')
     s.add_argument('--run-id'); s.add_argument('--pid', type=int)
@@ -389,6 +435,8 @@ def main(argv=None):
         s.add_argument('--since', required=True, help='when this launch started (ISO time)')
         s.add_argument('--pid', type=int, help='the launcher process')
         s.add_argument('--kind'); s.add_argument('--effort'); s.add_argument('--project')
+        s.add_argument('--run-dir', help='live: the run folder, for the wrap-up nudge')
+        s.add_argument('--run-cap', type=float, help='live: this run\'s cap in dollars (-MaxCost), instead of the "run" limit')
     s = sub.add_parser('backfill'); s.add_argument('projects', nargs='+')
     a = ap.parse_args(argv)
     d = Path(a.dir) if a.dir else spend_dir()
@@ -404,16 +452,16 @@ def main(argv=None):
                 lim['weekStartsOn'] = dt.date.today().weekday()
         (d / 'limits.json').write_text(json.dumps(lim, indent=2) + '\n', encoding='utf-8')
         print('DeepSeek spend is now limited to $%.2f a %s, across all projects%s.' % (
-            a.dollars, a.per, ', counting from now' + (' (weeks start on %s)' % dt.date.today().strftime('%A')
+            a.dollars, 'worker' if a.per == 'run' else a.per, ', counting from now' + (' (weeks start on %s)' % dt.date.today().strftime('%A')
                                                         if a.per == 'week' else '') if a.from_now else ''))
         return 0
     if a.cmd == 'off':
         lim = limits(d)
-        for period in ([a.per] if a.per else PERIODS):
+        for period in ([a.per] if a.per else PERIODS + ('run',)):
             lim.pop(period, None)
         if d.is_dir():
             (d / 'limits.json').write_text(json.dumps(lim, indent=2) + '\n', encoding='utf-8')
-        print('Limits now: %s' % (', '.join('$%.2f a %s' % (lim[p], p) for p in PERIODS if lim.get(p)) or 'none'))
+        print('Limits now: %s' % (', '.join('$%.2f a %s' % (lim[p], 'worker' if p == 'run' else p) for p in PERIODS + ('run',) if lim.get(p)) or 'none'))
         return 0
     if a.cmd == 'status':
         lim = limits(d)
@@ -429,6 +477,8 @@ def main(argv=None):
         p = pace(d, 'research')
         if any(lim.get(x) for x in PERIODS):
             print('pace:     %s' % ('ahead of an even pace, easing off: ' + EASE[p['ease']] if p['ease'] else 'on pace'))
+        if lim.get('run'):
+            print('per worker: stopped at $%.2f, told to wrap up at $%.2f' % (lim['run'], RUN_NUDGE_AT * lim['run']))
         running = live(d)
         if running:
             print('running:  %d worker(s), $%.2f so far' % (len(running), sum(r.get('cost') or 0 for r in running.values())))
@@ -444,6 +494,11 @@ def main(argv=None):
             return 0 if ok else REFUSED
         with locked(d):
             out = plan(d, a.kind, a.balance, lineage=a.lineage, waited=a.waited)
+            if a.claim and (not out['ok'] or out['wait']):
+                with open(d / 'holds.jsonl', 'a', encoding='utf-8') as fh:
+                    fh.write(json.dumps(dict(at=dt.datetime.now().astimezone().isoformat(timespec='seconds'),
+                                             run_id=a.run_id, kind=a.kind, held='refused' if not out['ok'] else 'waited',
+                                             ease=out['ease'], why=' '.join(out['lines'])[:300])) + '\n')
             if out['ok'] and not out['wait'] and a.claim and a.run_id and a.pid:
                 (d / 'live').mkdir(parents=True, exist_ok=True)
                 (d / 'live' / ('%s.json' % a.run_id)).write_text(
@@ -457,6 +512,12 @@ def main(argv=None):
         lf = d / 'live' / ('%s.json' % a.run_id)
         if a.cmd == 'live':
             lf.write_text(json.dumps(dict(run_id=a.run_id, pid=a.pid, cost=c, kind=a.kind)), encoding='utf-8')
+            cap = a.run_cap if a.run_cap is not None else limits(d).get('run')
+            if cap and c >= cap:
+                print('this worker has cost $%.2f, reaching the $%.2f cap per worker; brief what is left as smaller tasks' % (c, cap))
+                return REFUSED
+            if cap and a.run_dir and c >= RUN_NUDGE_AT * cap:
+                run_cap_nudge(a.run_dir, c, cap)
             hit = over(d, a.run_id)
             if hit:
                 print('the %s DeepSeek spend limit ($%.2f) is used up; it resets at %s' % ('daily' if hit[0] == 'day' else 'weekly', hit[1], resets(hit[0], None, d)))

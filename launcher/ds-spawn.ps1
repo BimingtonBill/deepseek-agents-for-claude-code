@@ -20,6 +20,9 @@ param(
     # Brief files, comma-separated. Each file name (without .md) becomes the child's label.
     [Parameter(Mandatory)][string[]]$Briefs,
     [ValidateSet('read', 'edit')][string]$Mode = 'read',
+    # A report longer than this comes back as its start and end, with the full text in its saved file;
+    # 0 prints every report whole.
+    [int]$ReportChars = 6000,
     # Children can message each other by default, like every worker; -NoCrosstalk turns it off.
     # -Crosstalk is still accepted from older callers.
     [switch]$Crosstalk,
@@ -85,7 +88,19 @@ foreach ($j in $jobs) {
     # harness" and recovered it from the spawn text; the file was there all along.
     $reportPath = Join-Path (Join-Path $stateDir 'runs') (Join-Path $runId 'report.md')
     if (Test-Path -LiteralPath $reportPath) { Write-Output "(also saved at $reportPath)" }
-    if ($text) { Write-Output $text } else { Write-Output '(no output)' }
+    # A long report comes back as its start and end, with the rest left in the saved file. Whatever a lead
+    # takes in, it re-reads on every later step: OpenSkyrim leads' children wrote a median of 17,000
+    # characters each, and one lead took in 211,000 (docs/todo.md item 6).
+    $body = ($text -split "`r?`n" | Where-Object { $_ -notmatch '^\[ds-agent\] run=' }) -join "`n"
+    if ($ReportChars -gt 0 -and $body.Length -gt $ReportChars -and (Test-Path -LiteralPath $reportPath)) {
+        $head = [int]($ReportChars * 0.75); $tail = $ReportChars - $head
+        Write-Output $body.Substring(0, $head).TrimEnd()
+        Write-Output ""
+        Write-Output "[... $($body.Length - $ReportChars) characters of this report left out here; they are in $($reportPath): Read the parts you need to check ...]"
+        Write-Output ""
+        Write-Output $body.Substring($body.Length - $tail).TrimStart()
+        if ($footer) { Write-Output $footer }
+    } elseif ($text) { Write-Output $text } else { Write-Output '(no output)' }
     if ($errText) { Write-Output $errText }
     Remove-Item -LiteralPath $j.Out, $j.Err -ErrorAction SilentlyContinue
 }

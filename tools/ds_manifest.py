@@ -109,6 +109,8 @@ def load_runs(path):
                 row = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(row, dict):   # valid JSON but not a record (audit finding MAK-20260924-02)
+                continue
             rid = row.get('run_id')
             if not rid:
                 continue
@@ -132,6 +134,8 @@ def find_brief(label, folder):
     if not folder:
         return None
     folder = Path(folder)
+    if re.search(r'[\\/:]|\.\.', label):   # a path, not a label (audit finding MAK-20260924-01)
+        return None
     base = re.sub(r'^(?:review|fix)-', '', label)
     base = re.sub(r'-(?:followup|resume\d*)$', '', base)
     exact = folder / (base + '.md')
@@ -221,10 +225,12 @@ def tree(runs):
     for r in runs:
         children.setdefault(r.get('parent_run_id') or None, []).append(r)
     lines = ['Claude (lead)']
+    shown = set()
 
     def walk(parent, prefix):
-        kids = children.get(parent, [])
+        kids = [r for r in children.get(parent, []) if r['run_id'] not in shown]
         for i, r in enumerate(kids):
+            shown.add(r['run_id'])
             last = i == len(kids) - 1
             lines.append('%s%s %s  [%s%s]' % (prefix, '`--' if last else '|--', describe(r), r.get('state', ''),
                                               ', %s turns' % r['turns'] if r.get('turns') else ''))
@@ -236,6 +242,13 @@ def tree(runs):
         if parent and parent not in known:
             lines.append('? %s (not in this manifest)' % parent)
             walk(parent, '    ')
+    # Whatever no walk reached, such as runs whose parents point at each other (audit finding
+    # MAK-20260924-03), is listed rather than dropped.
+    lost = [r for r in runs if r['run_id'] not in shown]
+    if lost:
+        lines.append('? runs not reachable from Claude (a parent loop):')
+        for r in lost:
+            lines.append('    %s  [%s]' % (describe(r), r.get('state', '')))
     return '\n'.join(lines)
 
 
