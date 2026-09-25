@@ -10,7 +10,7 @@
 #   ds-agent.ps1 and its helpers          from launcher/
 #   tools/*                               every tool, so a session can run them from any project folder
 #   templates/brief*.md, *-schema.json    brief templates and the result schema ds_impl.ps1 falls back on
-# and the advisor-loop skill beside it. -Target installs into another folder instead of ~/.claude/skills
+# and every other skill in skill/ beside it (advisor-loop, and the /delegation and /spend-limit commands). -Target installs into another folder instead of ~/.claude/skills
 # (for testing an install without touching the live one).
 #
 # It also registers ds_hook.py in ~/.claude/settings.json (backed up first; other settings are kept) as a
@@ -25,7 +25,7 @@ $skills = if ($Target) { $Target } else { Join-Path $HOME '.claude\skills' }
 $target = Join-Path $skills 'deepseek-agents'
 
 $files = [ordered]@{ 'SKILL.md' = 'skill\deepseek-agents\SKILL.md'; 'ds_hook.py' = 'skill\deepseek-agents\ds_hook.py' }
-foreach ($name in 'ds-agent.ps1', 'ds-spawn.ps1', 'ds_mcp.py', 'ds-which.ps1', 'ds-watch.ps1', 'ds-state.ps1', 'ds_spend.py', 'ds_steer.py') {
+foreach ($name in 'ds-agent.ps1', 'ds-spawn.ps1', 'ds_mcp.py', 'ds-which.ps1', 'ds-watch.ps1', 'ds-state.ps1', 'ds_spend.py', 'ds_steer.py', 'ds_claude.py') {
     $files[$name] = "launcher\$name"
 }
 foreach ($tool in Get-ChildItem (Join-Path $root 'tools') -File | Where-Object { $_.Extension -in '.py', '.ps1' -and $_.Name -notin 'install-skill.ps1', 'build-kit.py' }) {
@@ -34,13 +34,16 @@ foreach ($tool in Get-ChildItem (Join-Path $root 'tools') -File | Where-Object {
 foreach ($t in Get-ChildItem (Join-Path $root 'templates') -File | Where-Object { $_.Name -like 'brief*.md' -or $_.Name -like '*-schema.json' }) {
     $files["templates\$($t.Name)"] = "templates\$($t.Name)"
 }
-$advisor = @{ src = 'skill\advisor-loop\SKILL.md'; dst = (Join-Path $skills 'advisor-loop\SKILL.md') }
+# The other skills are one SKILL.md each: advisor-loop, and the /delegation and /spend-limit commands.
+$extras = @(Get-ChildItem (Join-Path $root 'skill') -Directory |
+    Where-Object { $_.Name -ne 'deepseek-agents' -and (Test-Path (Join-Path $_.FullName 'SKILL.md')) } |
+    ForEach-Object { @{ name = $_.Name; src = "skill\$($_.Name)\SKILL.md"; dst = (Join-Path $skills "$($_.Name)\SKILL.md") } })
 $backups = Join-Path $HOME '.claude-deepseek\backups'
 
 if ($DryRun) {
     "target: $target"
     foreach ($k in $files.Keys) { "  $k  <-  $($files[$k])" }
-    "  $($advisor.dst)  <-  $($advisor.src)"
+    foreach ($x in $extras) { "  $($x.dst)  <-  $($x.src)" }
     exit 0
 }
 New-Item -ItemType Directory -Force -Path $backups | Out-Null
@@ -54,10 +57,12 @@ foreach ($k in $files.Keys) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $to) | Out-Null
     Copy-Item -LiteralPath (Join-Path $root $files[$k]) -Destination $to -Force
 }
-New-Item -ItemType Directory -Force -Path (Split-Path -Parent $advisor.dst) | Out-Null
-if (Test-Path $advisor.dst) { Copy-Item $advisor.dst (Join-Path $backups "advisor-loop.SKILL.bak-$(Get-Date -Format yyyyMMdd-HHmmss).md") }
-Copy-Item -LiteralPath (Join-Path $root $advisor.src) -Destination $advisor.dst -Force
-"installed $($files.Count) files into $target, and the advisor-loop skill"
+foreach ($x in $extras) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $x.dst) | Out-Null
+    if (Test-Path $x.dst) { Copy-Item $x.dst (Join-Path $backups "$($x.name).SKILL.bak-$(Get-Date -Format yyyyMMdd-HHmmss).md") }
+    Copy-Item -LiteralPath (Join-Path $root $x.src) -Destination $x.dst -Force
+}
+"installed $($files.Count) files into $target, and the skills $(($extras | ForEach-Object { $_.name }) -join ', ')"
 
 # --- The lead hook in the user's Claude Code settings ---
 if (-not $NoHooks -and -not $customTarget) {

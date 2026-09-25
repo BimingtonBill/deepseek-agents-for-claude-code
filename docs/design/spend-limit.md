@@ -98,3 +98,22 @@ stopped.
   nudge, and `ds_steer.py deliver` handed it over (delivery to a live worker: probe-038). At the real
   $1.50 cap a late, large worker spends about $0.03 per 15 seconds, so the nudge at $1.12 comes many
   checks before the stop.
+
+## Stretch: make the credit last until a date
+
+"Make my credit last two weeks" (`ds_spend.py stretch 2w`, or `/spend-limit last 2 weeks`) sets
+`stretch.until` in limits.json. Each day's limit is then the balance as it was at midnight, spread evenly
+over the days left: the last saved balance, plus what was spent between midnight and that reading (or
+minus what was spent since, for a reading from the day before). It is worked out again every midnight, so
+a quiet day leaves more for the rest. The last day gets everything left. Nothing derived is saved:
+`limits()` works it out on every check, and the tighter of it and any daily limit applies. The usual
+pacing then spreads each day's share through the day. Estimated costs run higher than the real bill, so
+the credit lasts a little longer than planned, not shorter. Before any balance is known, nothing is held back.
+
+- On a copy of a real spend record and balance on 2026-09-25, `stretch 2w` gave today an even share with
+  14.4 days left, and `status` showed the pacing easing off, since over half of that share had gone by 09:25.
+- `probe-052-stretch` (spend folder with a 3000-day stretch, so $0.01 a day) was refused before it
+  started: "DeepSeek spend limit reached: ... of $0.01 today ... Today's daily limit is today's share of
+  the credit, spread to last until Tue 12 Dec at the user's request". The launcher's own fetch saved the
+  real balance on the way.
+- `probe-053-stretch-fits` (a 30-day stretch, $0.55 today, nothing spent yet) ran and finished normally.

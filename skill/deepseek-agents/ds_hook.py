@@ -9,6 +9,18 @@ Registered by tools/install-skill.ps1 in ~/.claude/settings.json for the Bash an
                  and the project.
     PostToolUse  after a lead starts, Claude is told the exact ds-watch.ps1 -Children command to start
                  next, so the lead's workers get their own Background tasks entries.
+                 Also on Agent calls, at most every half hour a session: the Claude plan's pace
+                 (ds_claude.py) when it is off pace or the reading is old, and a nudge to hand over when
+                 the session's own context has grown large.
+    SessionStart the short morning report in a project where workers ran, and the Claude plan's pace.
+
+In a project that runs workers, Claude subagents (the Agent tool) are named and recorded like workers:
+    PreToolUse   an Agent call is refused unless its description reads "Claude <kind> #<nnn>: <what>",
+                 numbered in the same sequence as the session's DeepSeek workers (a task Claude takes
+                 over from DeepSeek keeps its number), so the panel reads as one team.
+    PostToolUse  the run is recorded in the manifest (runs/<run id>/manifest.json and manifest.jsonl,
+                 provider "claude"), finished at once for a foreground subagent;
+    SubagentStop a background subagent's run is finished: its report, tokens, turns and time.
 
 Remembering this was left to Claude and it was forgotten (lead-001-duck-photos.1 ran in the foreground,
 with no panel entries for its three workers), so the hook makes it structural. Anything else passes
@@ -44,10 +56,272 @@ else:
     ds_state = None
 
 WATCH = Path(__file__).resolve().parent / 'ds-watch.ps1'
+NOTE_EVERY = 1800        # seconds between Claude-pace notes in one session
+BIG_CONTEXT = 400000     # tokens: past this a session re-reads a lot on every turn (one ran at 737k, 2026-09-25)
+
+
+
+
+def worker_state(cwd):
+    """The project's state dir when the project runs workers (the dir has runs/ and belongs to this
+    project), else None: elsewhere Agent calls are left alone."""
+    if ds_state is None or not cwd:
+        return None
+    try:
+        sd = Path(ds_state.state_dir(Path(cwd))).resolve()
+        root = Path(cwd).resolve()
+    except Exception:
+        return None
+    ours = root in sd.parents or (root / '.deepseek-agents.json').is_file()
+    return sd if ours and (sd / 'runs').is_dir() else None
+
+
+def next_number(transcript, sd):
+    """The next task number: after the highest #nnn among the last RECENT entries this session gave a
+    DeepSeek worker or Claude subagent (each session keeps its own sequence; only recent ones, so one odd
+    number long ago, like a hook test's #999, doesn't set it), else after the highest in the project's runs."""
+    try:
+        text = Path(transcript).read_text(encoding='utf-8', errors='replace')
+        seen = [int(n) for n in NUMBERED.findall(text)][-RECENT:]
+    except (OSError, TypeError):
+        seen = []
+    if not seen:
+        seen = [int(m.group(1)) for m in (re.match(r'^[a-z]+-(\d{3})-', p.name) for p in (sd / 'runs').iterdir()) if m]
+    return '%03d' % ((max(seen) if seen else 0) + 1)
+
+
+def agent_pre(event):
+    """Refuse an Agent call in a worker project unless its panel description is in the house format."""
+    sd = worker_state(event.get('cwd'))
+    tool_input = event.get('tool_input') or {}
+    desc = str(tool_input.get('description') or '').strip()
+    if sd is None or CLAUDE_PANEL.match(desc):
+        return
+    ref = TASK_REF.search(desc)
+    if ref:      # "Build field notes (impl-183)": Claude taking over a DeepSeek task keeps its number
+        kind, number = ref.group(1), ref.group(2)
+        what = re.sub(r'\s*[(\[]?\s*%s\s*[)\]]?\s*' % re.escape(ref.group(0)), ' ', desc).strip(' :-') or 'what it does'
+    else:
+        kind = {'Explore': 'research', 'Plan': 'analysis'}.get(str(tool_input.get('subagent_type')), '<kind>')
+        number, what = next_number(event.get('transcript_path'), sd), desc or 'what it does'
+    print(json.dumps({'hookSpecificOutput': {
+        'hookEventName': 'PreToolUse',
+        'permissionDecision': 'deny',
+        'permissionDecisionReason': (
+            'In this project Claude subagents are named like DeepSeek workers, in one numbered sequence, so the '
+            'panel reads as one team: "Claude %s #%s: %s" (kind: %s). A task taken over from a DeepSeek worker '
+            'keeps its number. Run the same call again with that description.' % (kind, number, what, ', '.join(KINDS))),
+    }}))
+
+
+def _slug(text):
+    return re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')[:40].strip('-') or 'task'
+
+
+def _transcript_totals(path):
+    """(tokens in, tokens out, turns) from a subagent transcript, each API message once."""
+    tin = tout = 0
+    seen = set()
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            for line in fh:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    msg = json.loads(line).get('message') or {}
+                except ValueError:
+                    continue
+                us, mid = msg.get('usage'), msg.get('id')
+                if not isinstance(us, dict) or mid in seen:
+                    continue
+                seen.add(mid)
+                tin += sum(us.get(k) or 0 for k in ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'))
+                tout += us.get('output_tokens') or 0
+    except (OSError, TypeError):
+        return None, None, None
+    return tin, tout, len(seen)
+
+
+def _write_run(sd, m, event_name):
+    import datetime as dt
+    folder = sd / 'runs' / m['run_id']
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp = folder / 'manifest.json.tmp'
+    tmp.write_text(json.dumps(m, indent=2), encoding='utf-8')
+    os.replace(str(tmp), str(folder / 'manifest.json'))
+    line = dict(event=event_name, at=dt.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), **m)
+    with open(sd / 'manifest.jsonl', 'a', encoding='utf-8') as fh:
+        fh.write(json.dumps(line) + '\n')
+
+
+def _finish(sd, m, report, transcript):
+    import datetime as dt
+    now = dt.datetime.now()
+    m.update(state='completed', ended=now.strftime('%Y-%m-%dT%H:%M:%S'),
+             seconds=int((now - dt.datetime.fromisoformat(m['started'])).total_seconds()), transcript=transcript)
+    tin, tout, turns = _transcript_totals(transcript)
+    if turns:
+        m.update(tokens_in=tin, tokens_out=tout, turns=turns)
+    m['report'] = str(sd / 'runs' / m['run_id'] / 'report.md')
+    Path(m['report']).parent.mkdir(parents=True, exist_ok=True)
+    Path(m['report']).write_text(report or '', encoding='utf-8')
+    _write_run(sd, m, 'end')
+
+
+def _index(sd, agent_id=None, run_id=None):
+    """Agent id -> run id, in <state dir>/claude-agents.json; with run_id, add that entry."""
+    path = sd / 'claude-agents.json'
+    try:
+        idx = json.loads(path.read_text(encoding='utf-8'))
+        idx = idx if isinstance(idx, dict) else {}
+    except (OSError, ValueError):
+        idx = {}
+    if run_id:
+        idx[agent_id] = run_id
+        tmp = path.with_name(path.name + '.tmp')
+        tmp.write_text(json.dumps(idx, indent=1), encoding='utf-8')
+        os.replace(str(tmp), str(path))
+    return idx
+
+
+def agent_post(event):
+    """Record a Claude subagent run; a foreground one has already finished."""
+    import datetime as dt
+    sd = worker_state(event.get('cwd'))
+    tool_input = event.get('tool_input') or {}
+    resp = event.get('tool_response') if isinstance(event.get('tool_response'), dict) else {}
+    m = CLAUDE_PANEL.match(str(tool_input.get('description') or '').strip())
+    if sd is None or not m or not resp.get('agentId'):
+        return
+    kind, number, what = m.group(1), m.group(2), m.group(3).strip()
+    task_id = '%s-%s-claude-%s' % (kind, number, _slug(re.sub(r'\((retry|resume) \d+\)', '', what)))
+    attempt = 1 + len(list((sd / 'runs').glob(task_id + '.*')))
+    run_id = '%s.%d' % (task_id, attempt)
+    started = dt.datetime.now() - dt.timedelta(milliseconds=int(resp.get('totalDurationMs') or 0))
+    run = dict(schema='ds-run/1', provider='claude', run_id=run_id, task_id=task_id, attempt=attempt, kind=kind,
+               title=what, project=Path(event.get('cwd')).name, dir=str(event.get('cwd')), parent_run_id=None,
+               root_run_id=run_id, lineage='claude/' + run_id, depth=1, state='working',
+               model=resp.get('resolvedModel') or tool_input.get('model'), agent_id=resp['agentId'],
+               agent_type=resp.get('agentType') or tool_input.get('subagent_type'),
+               background=resp.get('status') == 'async_launched', session_id=event.get('session_id'),
+               started=started.strftime('%Y-%m-%dT%H:%M:%S'), ended=None, seconds=None, turns=None,
+               tokens_in=None, tokens_out=None)
+    _write_run(sd, run, 'start')
+    _index(sd, resp['agentId'], run_id)
+    if resp.get('status') == 'completed':
+        text = '\n'.join(b.get('text', '') for b in resp.get('content') or [] if isinstance(b, dict))
+        base = Path(str(event.get('transcript_path') or ''))
+        _finish(sd, run, text, str(base.with_suffix('') / 'subagents' / ('agent-%s.jsonl' % resp['agentId'])))
+
+
+def agent_stop(event):
+    """A background subagent recorded by agent_post has stopped: finish its run."""
+    sd = worker_state(event.get('cwd'))
+    if sd is None or not event.get('agent_id'):
+        return
+    run_id = _index(sd).get(event['agent_id'])
+    path = sd / 'runs' / str(run_id) / 'manifest.json'
+    if not run_id or not path.is_file():
+        return          # not ours, or a foreground one: agent_post finishes those
+    try:
+        run = json.loads(path.read_text(encoding='utf-8'))
+    except ValueError:
+        return
+    _finish(sd, run, event.get('last_assistant_message') or '', event.get('agent_transcript_path'))
+
+
+def _ds_claude():
+    """ds_claude.py: beside this file once installed, in launcher/ in the harness; None when missing."""
+    here = Path(__file__).resolve().parent
+    for folder in (here, here.parents[1] / 'launcher'):
+        if (folder / 'ds_claude.py').is_file():
+            if str(folder) not in sys.path:
+                sys.path.insert(0, str(folder))
+            import ds_claude
+            return ds_claude
+    return None
+
+
+def context_tokens(transcript):
+    """The main thread's context at its last turn, from the transcript's tail (0 when unreadable)."""
+    try:
+        with open(transcript, 'rb') as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 400000))
+            tail = fh.read().decode('utf-8', errors='replace').splitlines()
+    except (OSError, TypeError):
+        return 0
+    for line in reversed(tail):
+        if '"usage"' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        us = (e.get('message') or {}).get('usage') if isinstance(e, dict) else None
+        if isinstance(us, dict) and not e.get('isSidechain'):
+            return sum(us.get(k) or 0 for k in ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'))
+    return 0
+
+
+def claude_note(event, now=None):
+    """At most every NOTE_EVERY seconds a session: the Claude plan's pace when it is off pace or the
+    reading is missing or old, and a hand-over nudge past BIG_CONTEXT. '' when there is nothing to say."""
+    import time
+    ds_claude = _ds_claude()
+    if ds_claude is None:
+        return ''
+    d = ds_claude.spend_dir()
+    notes = d / 'claude-notes.json'
+    try:
+        seen = json.loads(notes.read_text(encoding='utf-8'))
+        seen = seen if isinstance(seen, dict) else {}
+    except (OSError, ValueError):
+        seen = {}
+    sid = str(event.get('session_id') or '')
+    now = now or time.time()
+    if now - float(seen.get(sid) or 0) < NOTE_EVERY:
+        return ''
+    parts = []
+    s = ds_claude.status(d)
+    if s['level'] is None or s['level'] or s['stale']:
+        parts += ds_claude.lines(d)
+    size = context_tokens(event.get('transcript_path'))
+    if size > BIG_CONTEXT:
+        # The user compacts rather than starting new sessions (2026-09-25): a fresh session would also miss
+        # the finish notices of workers this one launched.
+        parts.append('This session re-reads about %dk tokens on every turn. At the next quiet moment (nothing '
+                     'mid-edit, no worker still running whose finish notice this session must get), suggest the '
+                     'user runs /compact. Before that, make sure the state lives in files that survive it (the '
+                     'handoff, the team log, or local/handover-<date>.md). Until then, hand big reading to '
+                     'DeepSeek workers.' % (size // 1000))
+    if not parts:
+        return ''
+    seen = {k: v for k, v in seen.items() if now - float(v or 0) < 86400}
+    seen[sid] = now
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = notes.with_name(notes.name + '.tmp')
+        tmp.write_text(json.dumps(seen), encoding='utf-8')
+        os.replace(str(tmp), str(notes))
+    except OSError:
+        pass
+    return '\n'.join(parts)
+
+
+def post_note(event):
+    note = claude_note(event)
+    if note:
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext': note}}))
 KINDS = ('research', 'websearch', 'impl', 'review', 'analysis', 'critic', 'digest', 'advisor', 'lead',
          'selftest', 'probe')
 # "DeepSeek <kind> #<nnn>: <what>", the panel format in the skill.
-PANEL = re.compile(r'^DeepSeek (%s) #\d{3}(\.\d+)?: \S' % '|'.join(KINDS))
+PANEL = re.compile(r'^DeepSeek (%s) #\d{3,}(\.\d+)?: \S' % '|'.join(KINDS))
+# The same house format for Claude subagents, a DeepSeek task id inside a description, and any numbered entry.
+CLAUDE_PANEL = re.compile(r'^Claude (%s) #(\d{3,})(?:\.\d+)?: (\S.*)$' % '|'.join(KINDS))
+TASK_REF = re.compile(r'\b(%s)-(\d{3})\b' % '|'.join(KINDS))
+NUMBERED = re.compile(r'"description":\s*"(?:DeepSeek|Claude) (?:%s) #(\d{3,})' % '|'.join(KINDS))
+RECENT = 20
 
 
 def without_heredocs(cmd):
@@ -141,15 +415,25 @@ def session_start(event):
     here = Path(__file__).resolve().parent
     # tools/ beside this file once installed; the harness keeps it two folders up.
     morning = next((p for p in (here / 'tools' / 'ds_morning.py', here.parents[1] / 'tools' / 'ds_morning.py') if p.is_file()), None)
-    if not morning or not (Path(cwd) / 'local').is_dir() and not os.environ.get('DS_STATE_DIR'):
-        return
+    text = ''
+    if morning and ((Path(cwd) / 'local').is_dir() or os.environ.get('DS_STATE_DIR')):
+        try:
+            done = subprocess.run([sys.executable, str(morning), '--project', cwd, '--short'], capture_output=True,
+                                  text=True, encoding='utf-8', errors='replace', timeout=12)
+            text = done.stdout.strip() if done.returncode == 0 else ''
+        except (OSError, subprocess.SubprocessError):
+            pass
     try:
-        done = subprocess.run([sys.executable, str(morning), '--project', cwd, '--short'], capture_output=True,
-                              text=True, encoding='utf-8', errors='replace', timeout=12)
-    except (OSError, subprocess.SubprocessError):
-        return
-    text = done.stdout.strip()
-    if done.returncode == 0 and text:
+        ds_claude = _ds_claude()
+        if ds_claude is not None:
+            text = (text + '\n\n' if text else '') + '\n'.join(ds_claude.lines(ds_claude.spend_dir()))
+            import ds_spend             # beside ds_claude.py
+            low = ds_spend.balance_warning(ds_claude.spend_dir())
+            if low:
+                text += '\n' + low
+    except Exception:
+        pass
+    if text:
         print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': text}}))
 
 
@@ -158,16 +442,29 @@ def main():
     if event.get('hook_event_name') == 'SessionStart':
         session_start(event)
         return
+    hook = event.get('hook_event_name')
+    if hook == 'SubagentStop':
+        agent_stop(event)
+        return
     if event.get('tool_name') not in ('Bash', 'PowerShell'):
+        if event.get('tool_name') in ('Agent', 'Task'):
+            if hook == 'PreToolUse':
+                agent_pre(event)
+            elif hook == 'PostToolUse':
+                try:
+                    agent_post(event)
+                finally:
+                    post_note(event)
         return
     tool_input = event.get('tool_input') or {}
     cmd = str(tool_input.get('command') or tool_input.get('script') or '')
     if not launches_worker(cmd):
+        if hook == 'PostToolUse':
+            post_note(event)
         return
     label = (arg(cmd, 'Label') or arg(cmd, 'Name')
              or (Path(arg(cmd, 'TaskFile') or arg(cmd, 'Brief')).stem if (arg(cmd, 'TaskFile') or arg(cmd, 'Brief')) else None)
              or 'task')
-    hook = event.get('hook_event_name')
 
     # The panel is how a human sees what is running, so every worker entry names its kind and number.
     if hook == 'PreToolUse' and not PANEL.match(str(tool_input.get('description') or '')):
@@ -215,8 +512,11 @@ def main():
                 'before anything else, with the description "Watch lead #<nnn> for new workers":\n%s\n'
                 'When it exits, start each ds-watch.ps1 -Run command it prints, in the background with the '
                 'description it prints. If the lead is still running, also restart the printed -Children ... '
-                '-Known ... command. Don\'t block in the foreground while the lead runs.%s' % (label, watch, unexpanded)),
+                '-Known ... command. Don\'t block in the foreground while the lead runs.%s' % (label, watch, unexpanded))
+                + ('\n\n' + note if (note := claude_note(event)) else ''),
         }}))
+    elif hook == 'PostToolUse':
+        post_note(event)
 
 
 def install(settings_path=None):
@@ -257,8 +557,9 @@ def install(settings_path=None):
                 out.append(g)
         return out
 
-    for event, matcher, timeout in (('PreToolUse', 'Bash|PowerShell', 10), ('PostToolUse', 'Bash|PowerShell', 10),
-                                    ('SessionStart', 'startup|resume', 15)):
+    for event, matcher, timeout in (('PreToolUse', 'Bash|PowerShell|Agent|Task', 10),
+                                    ('PostToolUse', 'Bash|PowerShell|Agent|Task', 10),
+                                    ('SubagentStop', '', 10), ('SessionStart', 'startup|resume', 15)):
         hooks[event] = without_ours(hooks.get(event, [])) + [
             {'matcher': matcher, 'hooks': [{'type': 'command', 'command': command, 'timeout': timeout}]}]
     path.parent.mkdir(parents=True, exist_ok=True)

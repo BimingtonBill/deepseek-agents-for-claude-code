@@ -28,3 +28,22 @@ also changed `HEAD_START` from 0.2 to 0.5. Verdict "reject", citing `ds_spend.py
 the effect on pacing and the tests it would fail; the docstring itself judged fine. 108 s, $0.03. A
 read-mode reviewer has no shell, so it compared the files by reading and computed the test outcomes by
 hand, and said so.
+
+## Claude subagents named and recorded like workers (2026-09-25)
+
+OpenSkyrim's panel showed "Build field notes (impl-183)" beside "DeepSeek research #184: ...": a Claude
+subagent that had taken over DeepSeek impl #183. The user asked for that to be the standard. In a project
+that runs workers, `ds_hook.py` now refuses an Agent call unless its description reads
+`Claude <kind> #<nnn>: <what>`, and gives the corrected name: the task's own number when the description
+names a DeepSeek task id, else the next after the highest among the session's last 20 numbered entries
+(a hook test's "#999" early in the harness session had pushed a plain maximum to #1000). It records each
+subagent in the manifest (provider `claude`, run id `<kind>-<nnn>-claude-<slug>.<attempt>`): at
+PostToolUse, finished at once for a foreground subagent, and at SubagentStop for a background one.
+
+What Claude Code sends was captured first with a logging hook: PostToolUse carries `agentId`,
+`resolvedModel` and `status` ("completed" or "async_launched"); SubagentStop carries `agent_id`,
+`agent_transcript_path` and `last_assistant_message`, and for a foreground subagent it arrives before
+PostToolUse. Live probes in this project: an unformatted Agent call was refused with
+"Claude <kind> #056: ..."; `Claude probe #056` (foreground) and `#057` (background) were both recorded
+`completed` with model claude-haiku-4-5, 1 turn, about 37-39k tokens in, and their final text as the
+report; `ds_manifest.py --tree` lists them as `[claude probe]`, and the morning report counts them.

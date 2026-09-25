@@ -189,7 +189,7 @@ def _int(value):
 
 def describe(run):
     """One line an outsider can read: '[impl] i07-rumble.2 (retry) - Title  <- parent'."""
-    bits = ['[%s]' % run.get('kind', 'task'), run['run_id']]
+    bits = ['[%s%s]' % ('claude ' if run.get('provider') == 'claude' else '', run.get('kind', 'task')), run['run_id']]
     if (run.get('attempt') or 1) > 1:
         bits.append('(attempt %d)' % run['attempt'])
     title = run.get('title') or ''

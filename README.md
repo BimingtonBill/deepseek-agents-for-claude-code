@@ -120,11 +120,13 @@ together, handles anything security-sensitive, and **checks every piece of DeepS
 - *"Set the DeepSeek delegation level to 4 for this project."*
 - *"Make DeepSeek delegation 2 my default for all projects."*
 
+Or type **`/delegation`** in Claude: on its own it shows the level, `/delegation 4` sets it for this project, `/delegation 2 global` sets your default, and `/delegation table` lists the levels.
+
 ## Keeping costs down: spend limits
 
 You can give DeepSeek a budget, per day or per week, covering all your projects. It works like Claude's usage limits: before each worker starts, the kit checks what you've spent and what that kind of worker usually costs. If it won't fit, the worker doesn't start and Claude does the work itself. A worker that's running when you hit the limit is stopped, and whatever it had found is kept. The limit resets at midnight, or on Monday for a weekly one (or, if you ask for it to count from now, on the weekday you set it).
 
-It also paces the spending so you rarely hit the limit at all, a bit like cruise control. The budget is spread evenly over the day (or week), with a head start so the morning isn't held back. If spending gets ahead of that pace, workers ease off step by step: less thinking effort, then one worker at a time, then no big coding jobs until the pace catches up. Claude also hands off a little less while it's ahead of pace. It also checks your DeepSeek balance, so workers don't start when your credit can't cover them.
+It also paces the spending so you rarely hit the limit at all, a bit like cruise control. The budget is spread evenly over the day (or week), with a head start so the morning isn't held back. If spending gets ahead of that pace, workers ease off step by step: less thinking effort, then one worker at a time, then no big coding jobs until the pace catches up. Claude also hands off a little less while it's ahead of pace. It also checks your DeepSeek balance, so workers don't start when your credit can't cover them, and Claude can see how long your credit will last and tells you when it's time to top up.
 
 You can also cap what any one worker may cost ("stop any worker at $1.50"): it's told to wrap up as it gets close, and stopped at the cap with what it had found kept. Only about 1 in 20 workers has ever cost that much.
 
@@ -132,8 +134,13 @@ There's no limit until you set one. Just tell Claude, for example:
 
 - *"Limit DeepSeek to $2 a day."*
 - *"How much DeepSeek have I used today?"*
+- *"Make my DeepSeek credit last two weeks."* Each day then gets an even share of what's left, worked out again every morning, so if one day is quiet the next ones get a little more.
+
+Or type **`/spend-limit`** in Claude: on its own it shows what's spent, what's left and the pace (DeepSeek's and your Claude plan's); `/spend-limit 20 week`, `/spend-limit 2 day` or `/spend-limit 1.5 run` set a limit (add `from now` to count only from now on), and `/spend-limit last 2 weeks` makes your credit last that long, and `/spend-limit off` removes them.
 
 The spend figures are estimates, worked out from token counts at DeepSeek's list prices, so the DeepSeek dashboard is the real bill.
+
+**Claude's own limits are paced too.** Your Claude plan has a 5-hour limit and a weekly one, and Claude's own work and its helpers use them up. In the Claude desktop app, Claude checks its usage at the start of a session, before big batches of work and about hourly in long runs, and works to match: normally at full speed; ahead of pace it hands more to DeepSeek and uses fewer of its own helpers; near a limit it only coordinates the DeepSeek workers. The two budgets cover for each other: while Claude is short, DeepSeek is allowed to spend faster (never past your limit), and when both are short, work waits for a reset rather than using either one up. Claude also suggests compacting (`/compact`) at a quiet moment when a long session has grown big, since every message re-reads the whole conversation.
 
 ## It learns and adjusts as it goes
 

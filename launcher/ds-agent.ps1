@@ -604,6 +604,14 @@ $settings['crossSessionInbound'] = if ($crosstalkOn) { 'accept' } else { 'refuse
 # to the worker after its next tool call.
 $steerTool = Join-Path $PSScriptRoot 'ds_steer.py'
 $steerOn = $python -and (Test-Path -LiteralPath $steerTool)
+# The step budget: the steps this kind usually takes, learned from finished runs (ds_steer.py budget). The
+# worker is told it up front, and the nudges measure against it.
+$stepBudget = 0
+if ($steerOn) {
+    $budgetArgs = @($steerTool, 'budget', '--kind', $Kind)
+    if ($spendDir) { $budgetArgs += @('--spend-dir', $spendDir) }
+    [int]::TryParse(((& $python @budgetArgs 2>$null) | Out-String).Trim(), [ref]$stepBudget) | Out-Null
+}
 if ($steerOn) {
     $hookCommand = '"{0}" "{1}" deliver --run-dir "{2}"' -f ($python -replace '\\', '/'), ($steerTool -replace '\\', '/'), ($runDir -replace '\\', '/')
     $settings['hooks'] = @{ PostToolUse = @(@{ matcher = '*'; hooks = @(@{ type = 'command'; command = $hookCommand; timeout = 10 }) }) }
@@ -614,6 +622,7 @@ $note = @(
     "You are worker $runId ($Kind): $($Title.TrimEnd('.')). $leadName delegated this task to you and will review your work."
     'You cannot ask questions: when something is ambiguous, make the most reasonable choice and say so in your report.'
     'Stay strictly within the scope of the task.'
+    $(if ($stepBudget -gt 0) { "Step budget: tasks like this usually finish in about $stepBudget steps (a step is one turn with its tool calls). Plan to report by then. If the task clearly needs far more, report what you have and what is left rather than running on; Claude will brief the rest." })
     $(if ($Mode -eq 'edit') { 'You may create and edit files inside the working directory only.' } else { 'You have read-only tools; do not try to change anything.' })
 )
 $projectDocs = @('CLAUDE.md', 'AGENTS.md') | Where-Object { Test-Path -LiteralPath (Join-Path $Dir $_) }
@@ -916,7 +925,9 @@ try {
         $wait = [Math]::Max(1, [Math]::Min(15000, [int]($deadline - (Get-Date)).TotalMilliseconds))
         if ($proc.WaitForExit($wait)) { break }
         if ($steerOn -and (Test-Path -LiteralPath $state.transcript)) {
-            $fired = @(& $python $steerTool watch --transcript $state.transcript --since $started.ToString('o') --run-dir $runDir 2>$null)
+            $watchArgs = @($steerTool, 'watch', '--transcript', $state.transcript, '--since', $started.ToString('o'), '--run-dir', $runDir)
+            if ($stepBudget -gt 0) { $watchArgs += @('--budget', [string]$stepBudget) }
+            $fired = @(& $python @watchArgs 2>$null)
             foreach ($key in $fired) { if ($key) { Note "nudged the worker: $key" } }
         }
         if ($spendOn -and (Test-Path -LiteralPath $state.transcript)) {

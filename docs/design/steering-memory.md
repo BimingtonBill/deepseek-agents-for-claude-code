@@ -53,3 +53,21 @@ Local only; 2.7 s for OpenSkyrim's 42 runs of a night. `ds_hook.py` runs its sho
 (startup, resume) and hands it to Claude as context when workers ran since the last report, saving the
 full report under `<state dir>/reports/`. Simulated session starts: the first printed the summary and the
 report path; a second, with nothing new, printed nothing; a folder without `local/` printed nothing.
+
+## Step budgets learned per kind (2026-09-25)
+
+The fixed nudges (100/150/200 steps) say nothing to a review drifting at 90 steps, though reviews usually
+take about 11. `ds_spend.py record` now keeps each run's steps; `ds_steer.py budget` gives the median of
+the kind's last 30 real runs (5+ steps and 2+ cents: harness probes of 2-6 steps had pulled research down to
+10), rounded up to 5, between 10 and 80. The launcher tells the worker its budget up front and passes it to
+`watch`, which nudges at 1.5x and 2x the budget where that comes before 100 steps. The 100-step nudge is
+firmer ("Stop exploring now"): one coder had read "finish the part you are on" as leave to carry on. With
+318 past runs back-filled: review 20, websearch 20, research 45, digest 40, analysis 60, lead 80, impl 80.
+
+Each `watch` also writes progress.json (steps, tool uses, context, what it is doing now), and
+`ds_steer.py progress` lists the running workers in one line each, so Claude can check on them cheaply.
+
+- `review-058-budget-probe` (budget 20; a task of 33 one-file reads): progress mid-run read "0m15s, 5 steps
+  (budget 20), 5 tool uses, context 12k, now: Read tests/test_ds_report.py". The worker quoted the budget
+  line, stopped at 19 steps without needing a nudge, and reported the 18 files done, the 14 not read, and
+  that the task as written could not fit the budget. The spend record kept `steps: 19`; cost $0.013.

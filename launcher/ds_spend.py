@@ -9,13 +9,17 @@ When it runs ahead, workers ease off in steps (see EASE):
   1. lower effort (max becomes high), a note to finish in few steps, delegation one level down;
   2. effort low, and one worker at a time (a new one waits for others to finish, up to 20 minutes);
   3. as 2, and no coders or leads until spending is back on pace.
+While Claude's own plan is tight (ds_claude.py, level 2 or more), the head start grows by
+CLAUDE_TIGHT_HEAD, so DeepSeek takes more of the work; the limits themselves never move.
 
     python ds_spend.py status                  what has been spent, what is left, when it resets
     python ds_spend.py set 2 --per day         limit DeepSeek spend to $2 a day (--per week for a week,
                                                --from-now to ignore what was spent before now)
     python ds_spend.py set 1.5 --per run       stop any one worker once it has cost $1.50 (a nudge to wrap
                                                up comes first, at 75%); ds-agent.ps1 -MaxCost overrides it
-    python ds_spend.py off [--per day|week|run] remove a limit (all of them when --per is left out)
+    python ds_spend.py stretch 2w              make the DeepSeek credit last two weeks (also 10d, 36h, 1m, or a
+                                               date: 2026-10-09); `stretch off` stops it
+    python ds_spend.py off [--per day|week|run|stretch]  remove a limit (all of them when --per is left out)
     python ds_spend.py backfill <project> ...  add past runs from those projects to the spend record
 
 ds-agent.ps1 calls the rest itself: check (before a worker starts), live (every 15 seconds while it
@@ -26,8 +30,13 @@ line per finished run) and live/ (what each running worker has spent so far).
 Costs are worked out from the token counts in each worker's transcript at DeepSeek's list prices
 (PRICE below; override with "prices" in limits.json). They come out higher than the DeepSeek dashboard
 (roughly a third higher in the one comparison made, 2026-09-24), so limits act a little early; the
-dashboard is the real bill. Nothing here calls DeepSeek: the launcher already
-fetches the balance and passes it in.
+dashboard is the real bill.
+
+The DeepSeek balance: the launcher fetches it before every worker and passes it to `check`, which keeps
+the latest in balance.json. `status` and `balance` fetch it fresh (the key is read from DEEPSEEK_API_KEY,
+this process's or the saved user variable, and never printed), and say how long it lasts at the last
+week's rate of spending. The morning report and the SessionStart hook use the saved value, and warn
+when it runs low.
 """
 import argparse
 import datetime as dt
@@ -53,6 +62,7 @@ REFUSED = 3            # exit code for "over the limit"
 # HEAD_START of the limit (so the first job of the day isn't held back). EASE_AT are the ratios of
 # (spent + this worker's estimate) to that allowance where each easing step begins.
 HEAD_START = 0.2
+CLAUDE_TIGHT_HEAD = 0.2   # extra head start while Claude's plan is tight (ds_claude.py level 2+): lean on DeepSeek
 EASE_AT = (1.0, 1.25, 1.5)
 EXPENSIVE = ('impl', 'lead')
 EASE = {1: 'lower effort, short jobs, delegation one level down',
@@ -71,13 +81,78 @@ def read_json(path, default):
         return default
 
 
-def limits(d):
-    return read_json(d / 'limits.json', {})
+def raw_limits(d):
+    """limits.json as saved."""
+    lim = read_json(d / 'limits.json', {})
+    return lim if isinstance(lim, dict) else {}
+
+
+def limits(d, now=None):
+    """The limits in force: limits.json, with the daily limit lowered to today's share of the credit while
+    a stretch is set (stretch_day). 'stretchDay' then holds that share."""
+    lim = raw_limits(d)
+    share = stretch_day(d, lim, now)
+    if share is not None:
+        lim['stretchDay'] = share
+        if not lim.get('day') or share < lim['day']:
+            lim['day'] = share
+    return lim
+
+
+# --- Stretch: make the credit last until a date ---
+
+def midnight(t):
+    t = t.astimezone()
+    return dt.datetime(t.year, t.month, t.day).astimezone()
+
+
+def stretch_day(d, lim=None, now=None):
+    """Today's share of the credit while a stretch is set: the balance as it was at midnight, spread evenly
+    over the days left until the stretch ends. The balance at midnight is the last saved balance plus what
+    was spent between midnight and that reading (or minus what was spent since, for a reading from before
+    midnight). None without a stretch, after it ends, or before any balance is known."""
+    lim = raw_limits(d) if lim is None else lim
+    st = lim.get('stretch')
+    if not isinstance(st, dict) or not st.get('until'):
+        return None
+    now = (now or dt.datetime.now().astimezone()).astimezone()
+    until = parse_time(st['until'])
+    if now >= until:
+        return None
+    b = last_balance(d)
+    if not b:
+        return None
+    day = midnight(now)
+    at = parse_time(b['at'])
+    between = sum(r.get('cost') or 0 for r in ledger(d) if r.get('ended') and min(day, at) <= parse_time(r['ended']) < max(day, at))
+    at_midnight = b['usd'] + (between if at >= day else -between)
+    days = max((until - day).total_seconds() / 86400, 1 / 24)
+    left = max(0.0, at_midnight)
+    return round(left / days if days >= 1 else left, 2)     # under a day to go: all of it today
+
+
+def parse_until(text, now=None):
+    """'2w', '10d', '36h', '1m' (30 days), '3 weeks', or a date ('2026-10-09': the end of that day) -> the
+    moment the credit should last until."""
+    import re
+    now = (now or dt.datetime.now().astimezone()).astimezone()
+    m = re.match(r'^\s*(\d+(?:\.\d+)?)\s*(h|hours?|d|days?|w|weeks?|m|mo|months?)\s*$', text.strip().lower())
+    if m:
+        n, unit = float(m.group(1)), m.group(2)[0]
+        hours = n * {'h': 1, 'd': 24, 'w': 24 * 7, 'm': 24 * 30}[unit]
+        return now + dt.timedelta(hours=hours)
+    try:
+        t = dt.datetime.fromisoformat(text.strip())
+    except ValueError:
+        raise ValueError('say how long, like 2w, 10d, 36h or 1m, or give a date like 2026-10-09')
+    if len(text.strip()) <= 10:          # a date alone: to the end of that day
+        t = t + dt.timedelta(days=1)
+    return t if t.tzinfo else t.astimezone()
 
 
 def prices(d):
     p = dict(PRICE)
-    p.update(limits(d).get('prices') or {})
+    p.update(raw_limits(d).get('prices') or {})
     return p
 
 
@@ -139,7 +214,7 @@ def window(period, now=None, d=None):
     now = (now or dt.datetime.now().astimezone()).astimezone()
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if period == 'week':
-        first = int(limits(d).get('weekStartsOn') or 0) if d else 0
+        first = int(raw_limits(d).get('weekStartsOn') or 0) if d else 0
         start -= dt.timedelta(days=(start.weekday() - first) % 7)
         end = start + dt.timedelta(days=7)
     else:
@@ -147,7 +222,7 @@ def window(period, now=None, d=None):
     # Rebuild from the date so a daylight-saving change doesn't shift midnight by an hour.
     start = dt.datetime(start.year, start.month, start.day).astimezone()
     end = dt.datetime(end.year, end.month, end.day).astimezone()
-    since = limits(d).get('countFrom') if d else None
+    since = raw_limits(d).get('countFrom') if d else None
     if since:
         since = parse_time(since).astimezone()
         if start < since < end:
@@ -247,7 +322,7 @@ def label(period):
 
 def check(d, kind, balance=None, now=None):
     """(ok, lines) for starting a worker of this kind now."""
-    lim = limits(d)
+    lim = limits(d, now)
     est = estimate(d, kind)
     lines = []
     for period in PERIODS:
@@ -297,13 +372,129 @@ def holds(d, since):
     return refused, list(waited.values())
 
 
+def claude_level(d, now=None):
+    """The Claude plan's pace level (ds_claude.py beside this file; 0 without it or without a reading)."""
+    try:
+        import ds_claude
+        return ds_claude.level(d, now)
+    except Exception:
+        return 0
+
+
+# --- The DeepSeek balance ---
+
+LOW_DAYS = 7        # warn when the balance lasts fewer days than this at the last week's rate
+LOW_USD = 2.0       # or when it is below this, whatever the rate
+
+
+def api_key():
+    key = os.environ.get('DEEPSEEK_API_KEY')
+    if not key and sys.platform == 'win32':
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, 'Environment') as k:
+                key = winreg.QueryValueEx(k, 'DEEPSEEK_API_KEY')[0]
+        except OSError:
+            key = None
+    return key or None
+
+
+def fetch_balance(timeout=10):
+    """(usd, available) from DeepSeek's /user/balance, or None when there is no key or the call fails."""
+    import urllib.request
+    key = api_key()
+    if not key:
+        return None
+    req = urllib.request.Request('https://api.deepseek.com/user/balance',
+                                 headers={'Authorization': 'Bearer ' + key, 'Accept': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = json.loads(r.read().decode('utf-8'))
+    except Exception:
+        return None
+    usd = next((i for i in body.get('balance_infos') or [] if i.get('currency') == 'USD'), None)
+    if not usd:
+        return None
+    return float(usd.get('total_balance') or 0), body.get('is_available') is not False
+
+
+def save_balance(d, usd, available=True, now=None):
+    now = (now or dt.datetime.now().astimezone()).astimezone()
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = d / 'balance.json.tmp'
+    tmp.write_text(json.dumps(dict(at=now.isoformat(timespec='seconds'), usd=round(usd, 4), available=available)),
+                   encoding='utf-8')
+    os.replace(str(tmp), str(d / 'balance.json'))
+
+
+def last_balance(d):
+    b = read_json(d / 'balance.json', None)
+    return b if isinstance(b, dict) and isinstance(b.get('usd'), (int, float)) and b.get('at') else None
+
+
+def daily_rate(d, now=None):
+    """Dollars a day to expect: the last 7 days' average, but no more than the limits allow."""
+    return rate_basis(d, now)[0]
+
+
+def rate_basis(d, now=None):
+    """(dollars a day, how it was found): the last 7 days' average, or the daily limit (or a seventh of the
+    weekly one) when that is lower, since spending can't run faster than the limits."""
+    now = (now or dt.datetime.now().astimezone()).astimezone()
+    since = now - dt.timedelta(days=7)
+    rate = sum(r.get('cost') or 0 for r in ledger(d) if r.get('ended') and parse_time(r['ended']) >= since) / 7
+    lim = limits(d, now)
+    caps = [(lim['day'], 'the $%.2f daily limit used in full' % lim['day'])] if lim.get('day') else []
+    if lim.get('week'):
+        caps.append((lim['week'] / 7, 'the $%.2f weekly limit used in full' % lim['week']))
+    cap = min(caps) if caps else None
+    if cap and cap[0] < rate:
+        return cap
+    return rate, "the last week's rate"
+
+
+def balance_line(d, usd, now=None, at=None):
+    """'DeepSeek balance: $12.34, about 11 days at the last week's rate ($1.10 a day).' plus its age when
+    it is a saved value, and a top-up note when it runs low."""
+    now = (now or dt.datetime.now().astimezone()).astimezone()
+    rate, how = rate_basis(d, now)
+    line = 'DeepSeek balance: $%.2f' % usd
+    if at:
+        mins = int((now - parse_time(at)).total_seconds() // 60)
+        line += ' (%s)' % ('checked %d min ago' % mins if mins < 120 else 'checked %s' % parse_time(at).astimezone().strftime('%a %H:%M'))
+    days = usd / rate if rate > 0 else None
+    if days is not None:
+        line += ', about %s at %s ($%.2f a day)' % ('%.0f days' % days if days >= 2 else '%.0f hours' % (days * 24), how, rate)
+    line += '.'
+    if low(usd, days):
+        line += ' Running low: tell the user it needs a top-up at platform.deepseek.com.'
+    return line
+
+
+def low(usd, days):
+    return usd < LOW_USD or (days is not None and days < LOW_DAYS)
+
+
+def balance_warning(d, now=None):
+    """The saved balance as one line when it runs low, else ''. No network."""
+    b = last_balance(d)
+    if not b:
+        return ''
+    rate = daily_rate(d, now)
+    if not low(b['usd'], b['usd'] / rate if rate > 0 else None):
+        return ''
+    return balance_line(d, b['usd'], now, at=b['at'])
+
+
 def pace(d, kind, now=None):
     """How far spending is ahead of an even pace: ease 0 (on pace) to 3, the period behind it, and when a
     worker of this kind fits the pace again (None when only the reset will do)."""
     now = (now or dt.datetime.now().astimezone()).astimezone()
-    lim = limits(d)
+    lim = limits(d, now)
     est = estimate(d, kind)
     best = dict(ease=0, period=None, fits_at=None)
+    # While Claude's plan is tight, DeepSeek may run further ahead of an even pace; its limits don't move.
+    head = HEAD_START + (CLAUDE_TIGHT_HEAD if claude_level(d, now) >= 2 else 0)
     for period in PERIODS:
         cap = lim.get(period)
         if not cap:
@@ -311,10 +502,10 @@ def pace(d, kind, now=None):
         start, end = window(period, now, d)
         gone = (now - start) / (end - start)
         need = spent(d, period, now) + est
-        ratio = need / (cap * min(1.0, gone + HEAD_START))
+        ratio = need / (cap * min(1.0, gone + head))
         ease = sum(ratio > t for t in EASE_AT)
         if ease > best['ease']:
-            fits = start + (end - start) * max(0.0, need / cap - HEAD_START)
+            fits = start + (end - start) * max(0.0, need / cap - head)
             best = dict(ease=ease, period=period, fits_at=fits if fits < end else None)
     return best
 
@@ -325,7 +516,17 @@ def plan(d, kind, balance=None, now=None, lineage='', waited=False):
     running and this one should wait for them)."""
     ok, lines = check(d, kind, balance, now)
     out = dict(ok=ok, lines=lines, ease=0, effort_cap=None, wait=False)
+    both = ("Claude's plan is ahead of its pace too (ds_claude.py status), so don't do this yourself: split off "
+            'what a research or review worker can do and queue the rest for when either budget frees up.')
     if not ok:
+        lim = limits(d, now)
+        if (lim.get('stretchDay') is not None and lim['day'] == lim['stretchDay']
+                and spent(d, 'day', now) + estimate(d, kind) > lim['day']):
+            lines.append("Today's daily limit is today's share of the credit, spread to last until %s at the "
+                         "user's request; the share is worked out again at midnight." % parse_time(
+                             lim['stretch']['until']).astimezone().strftime('%a %d %b'))
+        if claude_level(d, now) >= 2:
+            lines.append('But ' + both)
         return out
     p = pace(d, kind, now)
     ease = out['ease'] = p['ease']
@@ -335,8 +536,9 @@ def plan(d, kind, balance=None, now=None, lineage='', waited=False):
     if ease >= 3 and kind in EXPENSIVE:
         when = ('it fits the pace again at %s' % p['fits_at'].astimezone().strftime('%H:%M' if p['period'] == 'day' else '%a %H:%M')
                 if p['fits_at'] else 'it fits again after the reset at %s' % resets(p['period'], now, d))
-        out.update(ok=False, lines=['%s, so %s workers wait (%s). Do this yourself, split off the parts a research or '
-                                    'review worker can do, or wait.' % (ahead, kind, when)])
+        out.update(ok=False, lines=['%s, so %s workers wait (%s). %s' % (
+            ahead, kind, when, both if claude_level(d, now) >= 2 else
+            'Do this yourself, split off the parts a research or review worker can do, or wait.')])
         return out
     out['effort_cap'] = 'high' if ease == 1 else 'low'
     mine = set(filter(None, lineage.split('/')))
@@ -406,7 +608,7 @@ def run_cap_nudge(run_dir, spent_so_far, cap):
 
 def over(d, run_id, now=None):
     """The first limit that running workers and recorded runs together have now reached, or None."""
-    lim = limits(d)
+    lim = limits(d, now)
     for period in PERIODS:
         cap = lim.get(period)
         if cap and spent(d, period, now) >= cap:
@@ -414,15 +616,84 @@ def over(d, run_id, now=None):
     return None
 
 
+def stretch_line(d, now=None):
+    """'stretch: credit spread to last until Fri 9 Oct 09:00: $1.18 today (balance $16.91)', or ''."""
+    now = (now or dt.datetime.now().astimezone()).astimezone()
+    st = raw_limits(d).get('stretch')
+    if not isinstance(st, dict) or not st.get('until'):
+        return ''
+    until = parse_time(st['until']).astimezone()
+    when = until.strftime('%a %d %b %H:%M')
+    if now >= until:
+        return 'stretch:  ended %s (`stretch off` clears it, or set a new one)' % when
+    share = stretch_day(d, now=now)
+    if share is None:
+        return 'stretch:  to last until %s, waiting for a balance reading (the next worker or `balance` fetches it)' % when
+    days = (until - midnight(now)).total_seconds() / 86400
+    return 'stretch:  credit spread to last until %s: $%.2f for today, %.1f days left%s' % (
+        when, share, days, ' (a tighter daily limit is also set)' if raw_limits(d).get('day') and raw_limits(d)['day'] < share else '')
+
+
+def stretch_cmd(d, text, now=None):
+    now = (now or dt.datetime.now().astimezone()).astimezone()
+    lim = raw_limits(d)
+    if text.strip().lower() in ('off', 'stop', 'none'):
+        lim.pop('stretch', None)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / 'limits.json').write_text(json.dumps(lim, indent=2) + '\n', encoding='utf-8')
+        print('The credit is no longer stretched; the other limits stay as they were.')
+        return 0
+    try:
+        until = parse_until(text, now)
+    except ValueError as e:
+        print(str(e))
+        return 2
+    if until <= now:
+        print('That is already past.')
+        return 2
+    fresh = fetch_balance()
+    if fresh:
+        save_balance(d, *fresh, now=now)
+    d.mkdir(parents=True, exist_ok=True)
+    lim['stretch'] = dict(until=until.isoformat(timespec='seconds'), set=now.isoformat(timespec='seconds'))
+    (d / 'limits.json').write_text(json.dumps(lim, indent=2) + '\n', encoding='utf-8')
+    print('DeepSeek spending is now spread so your credit lasts until %s: each day gets an even share of what '
+          'is left, worked out again every day, and the usual pacing spreads each share through the day.'
+          % until.astimezone().strftime('%a %d %b %H:%M'))
+    line = stretch_line(d, now)
+    if line:
+        print(line)
+    if not fresh and not last_balance(d):
+        print('The balance could not be read yet, so nothing is held back until a worker launch reads it.')
+    return 0
+
+
+def show_balance(d, given=None, offline=False):
+    """The balance line for status: the given value, else a fresh fetch, else the saved one with its age."""
+    if given is not None:
+        return balance_line(d, given)
+    fresh = None if offline else fetch_balance()
+    if fresh:
+        save_balance(d, *fresh)
+        return balance_line(d, fresh[0])
+    b = last_balance(d)
+    return balance_line(d, b['usd'], at=b['at']) if b else None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('--dir', help='the spend folder (default: DS_SPEND_DIR or ~/.claude-deepseek/spend)')
     sub = ap.add_subparsers(dest='cmd', required=True)
     s = sub.add_parser('status'); s.add_argument('--balance', type=float)
+    s.add_argument('--offline', action='store_true', help='use the saved balance instead of asking DeepSeek')
+    s = sub.add_parser('balance', help='the DeepSeek balance and how long it lasts at the last week\'s rate')
+    s.add_argument('--offline', action='store_true'); s.add_argument('--json', action='store_true')
     s = sub.add_parser('set'); s.add_argument('dollars', type=float); s.add_argument('--per', choices=PERIODS + ('run',), default='day')
     s.add_argument('--from-now', action='store_true', help='count only spending from now on; with --per week, weeks '
                    'also start on today\'s weekday instead of Monday')
-    s = sub.add_parser('off'); s.add_argument('--per', choices=PERIODS + ('run',))
+    s = sub.add_parser('off'); s.add_argument('--per', choices=PERIODS + ('run', 'stretch'))
+    s = sub.add_parser('stretch', help='make the DeepSeek credit last until then: 2w, 10d, 36h, 1m, a date, or off')
+    s.add_argument('until')
     s = sub.add_parser('check'); s.add_argument('--kind', required=True); s.add_argument('--balance', type=float)
     s.add_argument('--json', action='store_true', help='print the plan (pace included) as JSON')
     s.add_argument('--run-id'); s.add_argument('--pid', type=int)
@@ -445,7 +716,7 @@ def main(argv=None):
         if a.dollars <= 0:
             ap.error('a limit must be more than 0; use "off" to remove one')
         d.mkdir(parents=True, exist_ok=True)
-        lim = limits(d); lim[a.per] = round(a.dollars, 2)
+        lim = raw_limits(d); lim[a.per] = round(a.dollars, 2)
         if a.from_now:
             lim['countFrom'] = dt.datetime.now().astimezone().isoformat(timespec='seconds')
             if a.per == 'week':
@@ -455,9 +726,11 @@ def main(argv=None):
             a.dollars, 'worker' if a.per == 'run' else a.per, ', counting from now' + (' (weeks start on %s)' % dt.date.today().strftime('%A')
                                                         if a.per == 'week' else '') if a.from_now else ''))
         return 0
+    if a.cmd == 'stretch':
+        return stretch_cmd(d, a.until)
     if a.cmd == 'off':
-        lim = limits(d)
-        for period in ([a.per] if a.per else PERIODS + ('run',)):
+        lim = raw_limits(d)
+        for period in ([a.per] if a.per else PERIODS + ('run', 'stretch')):
             lim.pop(period, None)
         if d.is_dir():
             (d / 'limits.json').write_text(json.dumps(lim, indent=2) + '\n', encoding='utf-8')
@@ -479,14 +752,35 @@ def main(argv=None):
             print('pace:     %s' % ('ahead of an even pace, easing off: ' + EASE[p['ease']] if p['ease'] else 'on pace'))
         if lim.get('run'):
             print('per worker: stopped at $%.2f, told to wrap up at $%.2f' % (lim['run'], RUN_NUDGE_AT * lim['run']))
+        if stretch_line(d):
+            print(stretch_line(d))
         running = live(d)
         if running:
             print('running:  %d worker(s), $%.2f so far' % (len(running), sum(r.get('cost') or 0 for r in running.values())))
-        if a.balance is not None:
-            print('balance:  $%.2f' % a.balance)
+        b = show_balance(d, a.balance, a.offline)
+        if b:
+            print('balance:  ' + b.replace('DeepSeek balance: ', ''))
         print('(estimated from transcripts at list prices; the DeepSeek dashboard has the real bill)')
         return 0
+    if a.cmd == 'balance':
+        fresh = None if a.offline else fetch_balance()
+        if fresh:
+            save_balance(d, *fresh)
+        b = last_balance(d)
+        if a.json:
+            rate = daily_rate(d)
+            print(json.dumps(dict(usd=b['usd'], at=b['at'], available=b.get('available', True), fresh=bool(fresh),
+                                  per_day=round(rate, 4), days=round(b['usd'] / rate, 1) if rate > 0 else None) if b else None))
+        else:
+            print(balance_line(d, b['usd'], at=None if fresh else b['at']) if b else
+                  'DeepSeek balance: unknown (no key in DEEPSEEK_API_KEY, or DeepSeek did not answer, and none saved yet).')
+        return 0
     if a.cmd == 'check':
+        if a.balance is not None:     # the launcher's fetch: keep it, so status and the reports can show it
+            try:
+                save_balance(d, a.balance)
+            except OSError:
+                pass
         if not a.json:
             ok, lines = check(d, a.kind, a.balance)
             for line in lines:
@@ -525,6 +819,11 @@ def main(argv=None):
             return 0
         row = dict(run_id=a.run_id, kind=a.kind, effort=a.effort, project=a.project, started=a.since,
                    ended=dt.datetime.now().astimezone().isoformat(timespec='seconds'), cost=round(c, 5), **u)
+        try:                  # the steps it took, for the step budget of its kind (ds_steer.budget)
+            import ds_steer
+            row['steps'] = ds_steer.signals(a.transcript, parse_time(a.since))['steps']
+        except Exception:
+            pass
         with open(d / 'spend.jsonl', 'a', encoding='utf-8') as fh:
             fh.write(json.dumps(row) + '\n')
         try:

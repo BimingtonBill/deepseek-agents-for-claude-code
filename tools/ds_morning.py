@@ -32,6 +32,10 @@ try:
     import ds_spend
 except ImportError:   # an old install without them: report what the manifests say
     ds_steer = ds_spend = None
+try:
+    import ds_claude
+except ImportError:
+    ds_claude = None
 
 LONG_STEPS = 100
 SLEEP_WORTH = 300
@@ -75,10 +79,22 @@ def analyse(sd, runs):
     return rows
 
 
+def claude_line(helpers):
+    done = [m for m in helpers if m.get('state') == 'completed']
+    tokens = sum(m.get('tokens_in') or 0 for m in done)
+    return 'Claude subagents: %d run(s), %d finished, %.1fM tokens read%s.' % (
+        len(helpers), len(done), tokens / 1e6,
+        ', longest %s (%s turns)' % (max(done, key=lambda m: m.get('turns') or 0)['run_id'],
+                                     max(m.get('turns') or 0 for m in done)) if done else '')
+
+
 def report(project, since):
     """The full report and the short one, from one pass over the runs."""
     sd = Path(state_dir(project))
     runs = runs_since(sd, since)
+    # Claude subagents are recorded beside the workers (provider "claude"); they cost plan usage, not dollars.
+    helpers = [m for m in runs if m.get('provider') == 'claude']
+    runs = [m for m in runs if m.get('provider') != 'claude']
     rows = analyse(sd, runs)
     states = collections.Counter(r['m']['state'] for r in rows)
     total = sum(r['cost'] for r in rows)
@@ -117,6 +133,9 @@ def report(project, since):
         pace = ds_spend.pace(d, 'research')
         if parts:
             spend_line = 'Spend: %s%s.' % ('; '.join(parts), ', ahead of pace (easing off)' if pace['ease'] else ', on pace')
+        b = ds_spend.last_balance(d)
+        if b:
+            spend_line = ((spend_line + ' ') if spend_line else '') + ds_spend.balance_line(d, b['usd'], at=b['at'])
         held, waited = ds_spend.holds(d, since.astimezone(dt.timezone.utc))
         if held or waited:
             spend_line = (spend_line or 'Spend:') + ' Held by the limits: %d launch(es) refused%s, %d made to wait.' % (
@@ -135,6 +154,8 @@ def report(project, since):
             lines.append('Workers slept %d min waiting on builds.' % (sum(r['sig']['slept'] for r in slept) // 60))
         if spend_line:
             lines.append(spend_line)
+    if helpers:
+        lines.append(claude_line(helpers))
     if audits_due or audits_high:
         lines.append(audit_lines[0][0].upper() + audit_lines[0][1:] + ('. `python "%s" due` briefs them.' % Path(ds_audit.__file__).resolve()
                                                                       if audits_due else '. `ds_audit.py findings` lists them.'))
@@ -145,8 +166,12 @@ def report(project, since):
     short = '\n'.join(lines)
 
     out = ['# DeepSeek morning report: %s' % project.name, '', head, '']
+    if helpers:
+        out += [claude_line(helpers), '']
     if spend_line:
         out += [spend_line, '']
+    if ds_claude:   # the short form leaves this to the SessionStart hook, which adds it in every session
+        out += [' '.join(ds_claude.lines(ds_claude.spend_dir())), '']
     out += ['## Needs attention', ''] + (['- ' + a for a in attention] or ['- nothing failed, timed out or got stuck']) + ['']
     out += ['## Long runs (%d+ steps)' % LONG_STEPS, '']
     out += ['- %s: %d steps, context %dk, $%.2f%s' % (r['m']['run_id'], r['sig']['steps'], r['sig']['context'] // 1000, r['cost'],
