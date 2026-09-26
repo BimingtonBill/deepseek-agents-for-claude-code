@@ -116,6 +116,67 @@ function Set-TaskTarget([string]$Worktree, [switch]$Seed) {
     }
 }
 
+# --- Any kind of project, not only Rust (the user's aim, 2026-09-26: "anyone should be able to install
+# DeepSeek workers and point it at any project"; an npm project's lead had bypassed this script) ---
+# The project's kinds decide the coder's default shell rules; the brief's own acceptance commands are always
+# allowed on top, so a coder can run the check it will be judged by.
+$ecosystems = @(
+    if ($isCargo) { 'rust' }
+    if (Test-Path (Join-Path $root 'package.json')) { 'node' }
+    if (@('pyproject.toml', 'setup.py', 'setup.cfg', 'requirements.txt') | Where-Object { Test-Path (Join-Path $root $_) }) { 'python' }
+    if (Test-Path (Join-Path $root 'go.mod')) { 'go' }
+    if (Get-ChildItem $root -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.sln', '.csproj', '.fsproj' } | Select-Object -First 1) { 'dotnet' }
+)
+$ecosystemRules = @{
+    rust   = 'Bash(cargo check *),Bash(cargo test *),Bash(cargo clippy *),Bash(cargo fmt *),Bash(cargo tree *)'
+    node   = 'Bash(npm test),Bash(npm test *),Bash(npm run *),Bash(node *),Bash(npx tsc *),Bash(npx vitest *),Bash(npx jest *),Bash(npx eslint *),Bash(pnpm test),Bash(pnpm test *),Bash(pnpm run *),Bash(yarn test),Bash(yarn test *),Bash(yarn run *)'
+    python = 'Bash(python -m pytest *),Bash(pytest *)'
+    go     = 'Bash(go test *),Bash(go build *),Bash(go vet *)'
+    dotnet = 'Bash(dotnet test *),Bash(dotnet build *)'
+}
+# Folders a project's tests need but git does not carry (installed dependencies): a fresh worktree lacks
+# them, so `npm test` fails there. Each one the project has and git ignores is linked into the worktree as a
+# junction (no copy), and the coder may not edit inside it. `worktreeLinks` in .deepseek-agents.json replaces
+# the list. The links are removed before a worktree is, so no delete can follow one into the real folder.
+function Get-LinkNames {
+    $cfgPath = Join-Path $root '.deepseek-agents.json'
+    $cfg = if (Test-Path $cfgPath) { Get-Content $cfgPath -Raw | ConvertFrom-Json } else { $null }
+    if ($cfg -and $cfg.worktreeLinks) { @($cfg.worktreeLinks) } else { @('node_modules', '.venv', 'venv') }
+}
+function Get-TaskLinks {
+    @(Get-LinkNames | Where-Object { Test-Path -LiteralPath (Join-Path $root $_) -PathType Container } | Where-Object {
+        & git -C $root check-ignore -q -- $_ 2>$null; $LASTEXITCODE -eq 0 })
+}
+function Add-TaskLinks([string]$Worktree) {
+    foreach ($n in Get-TaskLinks) {
+        $dst = Join-Path $Worktree $n
+        if (Test-Path -LiteralPath $dst) { continue }
+        & cmd.exe /c mklink /J "$dst" "$(Join-Path $root $n)" | Out-Null
+        if ($LASTEXITCODE -eq 0) { "[ds-impl] linked $n from the main checkout (read-only for the coder)" }
+        else { "[ds-impl] could not link ${n}; tests that need it will fail in the worktree" }
+    }
+    $global:LASTEXITCODE = 0
+}
+function Remove-TaskLinks([string]$Worktree) {
+    foreach ($item in @(Get-ChildItem -LiteralPath $Worktree -Force -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })) {
+        [IO.Directory]::Delete($item.FullName)     # not recursive: removes the link, never what it points to
+    }
+}
+# local/ holds worktrees and run records. In a project that doesn't ignore it, keep it out of git through the
+# clone's own .git/info/exclude, which changes no tracked file.
+function Set-LocalIgnored {
+    & git -C $root check-ignore -q -- 'local/impl' 2>$null
+    if ($LASTEXITCODE -eq 0) { return }
+    $common = (& git -C $root rev-parse --path-format=absolute --git-common-dir 2>$null)
+    if (-not $common) { $global:LASTEXITCODE = 0; return }
+    $exclude = Join-Path $common.Trim() 'info\exclude'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $exclude) | Out-Null
+    [IO.File]::AppendAllText($exclude, "`n# DeepSeek workers: worktrees and run records`n/local/`n")
+    "[ds-impl] added /local/ to .git/info/exclude, so worktrees and run records stay out of git"
+    $global:LASTEXITCODE = 0
+}
+
 function Fail([string]$m) { [Console]::Error.WriteLine("[ds-impl] $m"); exit 2 }
 function Split-List([string]$v) {
     if (-not $v) { return @() }
@@ -162,6 +223,7 @@ if ($List) {
 if ($Discard) {
     $path = Join-Path $implRoot $Discard
     if (-not (Test-Path $path)) { Fail "no such task: $Discard" }
+    Remove-TaskLinks $path
     & git -C $root worktree remove --force $path
     "[ds-impl] discarded $Discard"
     exit 0
@@ -202,8 +264,10 @@ if ($Integrate) {
     $reviewRoot = Join-Path $stateDir 'runs'
     $reviewReport = $null
     if (Test-Path -LiteralPath $reviewRoot) {
+        $reviewNum = if ($reviewName -match '^(\d{3,})-') { $Matches[1] } else { $null }
         $reviewReport = Get-ChildItem $reviewRoot -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -eq "review-$reviewName" -or $_.Name -like "review-$reviewName.*" } |
+            Where-Object { $_.Name -eq "review-$reviewName" -or $_.Name -like "review-$reviewName.*" -or
+                           ($reviewNum -and $_.Name -like "review-$reviewNum-claude-*") } |
             Sort-Object LastWriteTime -Descending |
             ForEach-Object { Join-Path $_.FullName 'report.md' } |
             Where-Object { Test-Path -LiteralPath $_ } |
@@ -217,6 +281,12 @@ if ($Integrate) {
         if (-not $verdictLine -and $verdictLines.Count -gt 0) { $verdictLine = $verdictLines[0] }
         if ($verdictLine) { "[ds-impl] check: review - $($verdictLine.ToString().Trim())" }
         else { "[ds-impl] check: review - report at $reviewReport has no line mentioning Verdict; read it yourself" }
+        # The standard opening's verdict (launcher/ds_envelope.py) decides: a review that says "fix first" or
+        # "reject" holds the merge back until the findings are dealt with.
+        $verdictWord = if ($verdictLine -match 'Verdict\W*\s*(accept|fix first|reject)') { $Matches[1].ToLower() } else { $null }
+        if ($verdictWord -in @('fix first', 'reject') -and -not $Force) {
+            Fail "the review of $Integrate says '$verdictWord' ($reviewReport). Deal with its findings first: fix them in the worktree yourself or brief a fix task, then run another review, or pass -Force to integrate anyway once they are handled."
+        }
     } else {
         "[ds-impl] check: review - no review worker ran; review the diff yourself"
     }
@@ -356,10 +426,13 @@ if ($DryRun) {
     "owned:    $($owned -join ', ')"
     "accept:   $($checks -join ' | ')"
     "size:     $ownedLines lines in owned files$(if (-not $sizeNote) { ' (small enough)' })"
+    "kinds:    $(if ($ecosystems) { $ecosystems -join ', ' } else { '(none detected: python only, plus the acceptance commands)' })"
+    "links:    $(if ($l = Get-TaskLinks) { $l -join ', ' } else { '(none)' })"
     exit 0
 }
 
 if (Test-Path $work) { Fail "$Name already exists: review it, then -Integrate or -Discard it" }
+Set-LocalIgnored
 New-Item -ItemType Directory -Force -Path $implRoot | Out-Null
 & git -C $root worktree add --detach $work $baseCommit | Out-Null
 if (-not (Test-Path $work)) { Fail 'git worktree add failed' }
@@ -383,12 +456,13 @@ $scoped = [ordered]@{
     readOnlyDirs = @($config.readOnlyDirs | Where-Object { $_ }) + @(
         Get-ChildItem (Join-Path $root 'local') -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -notin @('impl', 'agents') } | ForEach-Object { $_.FullName })
-    denyEdit     = $keptDenies
-    # A project may set implAllowTools in .deepseek-agents.json; otherwise python, plus cargo for Rust projects.
-    # implAllowTools replaces the default set; the project's own allowTools are always kept too (H4).
+    denyEdit     = @($keptDenies) + @(Get-TaskLinks | ForEach-Object { "$_/**" })
+    # A project may set implAllowTools in .deepseek-agents.json; otherwise python plus the rules for each kind
+    # of project detected above. implAllowTools replaces the default set; the project's own allowTools are
+    # always kept too (H4), and so are the brief's acceptance commands.
     allowTools   = ((@([string]$config.allowTools) + @($(if ($config.implAllowTools) { [string]$config.implAllowTools }
-                     elseif ($isCargo) { 'Bash(cargo check *),Bash(cargo test *),Bash(cargo clippy *),Bash(cargo fmt *),Bash(cargo tree *),Bash(python *),Bash(python -m unittest *)' }
-                     else { 'Bash(python *),Bash(python -m unittest *)' }))) | Where-Object { $_ }) -join ','
+                     else { (@('Bash(python *),Bash(python -m unittest *)') + @($ecosystems | ForEach-Object { $ecosystemRules[$_] })) -join ',' })) +
+                     @($checks | Where-Object { $_ -and $_ -notmatch ',' } | ForEach-Object { "Bash($_)"; "Bash($_ *)" })) | Where-Object { $_ }) -join ','
     stateDir     = $stateDir
     defaults     = [ordered]@{ mode = 'edit'; effort = $Effort; maxTurns = $MaxTurns; timeoutMinutes = $TimeoutMinutes }
 }
@@ -398,6 +472,7 @@ $scoped = [ordered]@{
     ([ordered]@{ task = $Name; base = $baseCommit; files = $owned; accept = $checks; brief = $Brief } |
         ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding $false))
 Set-TaskTarget $work -Seed
+Add-TaskLinks $work
 
 $started = Get-Date
 "[ds-impl] $Name on $($baseCommit.Substring(0,7)) in $work"
@@ -470,7 +545,10 @@ if (-not $accepted) { exit 1 }
 # this one runs beside it, since it builds nothing. OpenSkyrim ran 78 coders and 8 reviews in three days
 # (2026-09-22..24), with one worker at a time for 59% of the time workers ran.
 $reviewLabel = 'review-' + ($Name -replace '^impl-', '')
-$reviewTask = "Review coder task $Name. Its brief: $briefPath. Its work is in the git worktree $work; the changed files are $($touched -join ', '). Check that the change does what the brief asks and nothing more, stays in its owned files, and is covered by its tests, and look for what the acceptance commands would miss. Read-only: report findings with file:line and a verdict (accept, fix first, or reject); do not fix anything."
-"[ds-impl] next, in one message: start the next coder now, and this DeepSeek review of $Name beside it (read-only, so build limits don't apply):"
-"  powershell -NoProfile -ExecutionPolicy Bypass -File `"$agent`" -Kind review -Mode read -Effort high -Dir `"$root`" -Label $reviewLabel -Task `"$reviewTask`""
+$acceptList = if ($checks) { ($checks | ForEach-Object { "'$_'" }) -join ', ' } else { '(none recorded)' }
+$reviewTask = "Review coder task $Name. Its brief: $briefPath. You are working in its git worktree; the main checkout, for comparison, is $root. The changed files are $($touched -join ', '). First see the change itself with 'git status' and 'git diff' (new files show in git status; read them). Then re-run the acceptance commands yourself: $acceptList, and say what you ran and what it printed; don't rely on the coder's own log. Check that the change does what the brief asks and nothing more, stays in its owned files, and is covered by its tests, and look for what the acceptance commands would miss. Read-only: report findings with file:line; do not fix anything."
+# Reviewers could run nothing before (10 of 19 OpenSkyrim reviews said so, 2026-09-25): allow the diff and the checks.
+$reviewRules = @('Bash(git status*)', 'Bash(git diff*)', 'Bash(git log *)', 'Bash(git show *)') + @($checks | Where-Object { $_ -and $_ -notmatch ',' } | ForEach-Object { "Bash($_)"; "Bash($_ *)" })
+"[ds-impl] next, in one message: start the next coder now, and this DeepSeek review of $Name beside it (it works in this worktree and builds only there):"
+"  powershell -NoProfile -ExecutionPolicy Bypass -File `"$agent`" -Kind review -Mode read -Effort high -Dir `"$work`" -AddDir `"$root`" -AllowTools `"$($reviewRules -join ',')`" -Label $reviewLabel -Task `"$reviewTask`""
 "[ds-impl] integrate $Name after reading the review; meanwhile do your own part (the next brief, integration wiring, checks of earlier work)."

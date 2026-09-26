@@ -13,11 +13,14 @@ Registered by tools/install-skill.ps1 in ~/.claude/settings.json for the Bash an
                  (ds_claude.py) when it is off pace or the reading is old, and a nudge to hand over when
                  the session's own context has grown large.
     SessionStart the short morning report in a project where workers ran, and the Claude plan's pace.
+    UserPromptSubmit  a prompt about the DeepSeek budget: a reminder to apply it with ds_spend.py, which every
+                 session shares, not only in this session's memory.
 
 In a project that runs workers, Claude subagents (the Agent tool) are named and recorded like workers:
     PreToolUse   an Agent call is refused unless its description reads "Claude <kind> #<nnn>: <what>",
                  numbered in the same sequence as the session's DeepSeek workers (a task Claude takes
-                 over from DeepSeek keeps its number), so the panel reads as one team.
+                 over from DeepSeek keeps its number), so the panel reads as one team. A well-named call
+                 gets the standard report opening added to its prompt (launcher/ds_envelope.py).
     PostToolUse  the run is recorded in the manifest (runs/<run id>/manifest.json and manifest.jsonl,
                  provider "claude"), finished at once for a foreground subagent;
     SubagentStop a background subagent's run is finished: its report, tokens, turns and time.
@@ -29,7 +32,6 @@ untouched, and any error here lets the tool call through: a broken hook must nev
 import json
 import os
 import re
-import shlex
 import sys
 from pathlib import Path
 
@@ -56,7 +58,8 @@ else:
     ds_state = None
 
 WATCH = Path(__file__).resolve().parent / 'ds-watch.ps1'
-NOTE_EVERY = 1800        # seconds between Claude-pace notes in one session
+CODING_KINDS = ('impl',)  # Claude subagents of these kinds run on Opus unless the plan is tight
+NOTE_EVERY = 1800       # seconds between Claude-pace notes in one session
 BIG_CONTEXT = 400000     # tokens: past this a session re-reads a lot on every turn (one ran at 737k, 2026-09-25)
 
 
@@ -68,7 +71,9 @@ def worker_state(cwd):
     if ds_state is None or not cwd:
         return None
     try:
-        sd = Path(ds_state.state_dir(Path(cwd))).resolve()
+        # The rule in Python: state_dir() starts PowerShell (1.7 s idle), and under a cargo build that passed
+        # the hook's 10 s limit, so OpenSkyrim's impl #185 was never recorded as finished (2026-09-25).
+        sd = Path(ds_state.fallback_dir(Path(cwd))).resolve()
         root = Path(cwd).resolve()
     except Exception:
         return None
@@ -90,12 +95,44 @@ def next_number(transcript, sd):
     return '%03d' % ((max(seen) if seen else 0) + 1)
 
 
+def coding_model(kind, asked):
+    """Opus for a Claude subagent that writes code, unless the Claude plan is tight (level 2 or more), when
+    the caller's choice stands. The user's call, 2026-09-25: coding subagents had been sent on Sonnet
+    (impl #185 spent 48 minutes and 172 turns on a renderer bug). None means leave the model alone."""
+    if kind not in CODING_KINDS or asked == 'opus':
+        return None
+    ds_claude = _ds_claude()
+    try:
+        tight = ds_claude is not None and ds_claude.level(ds_claude.spend_dir()) >= 2
+    except Exception:
+        tight = False
+    return None if tight else 'opus'
+
+
 def agent_pre(event):
     """Refuse an Agent call in a worker project unless its panel description is in the house format."""
     sd = worker_state(event.get('cwd'))
     tool_input = event.get('tool_input') or {}
     desc = str(tool_input.get('description') or '').strip()
-    if sd is None or CLAUDE_PANEL.match(desc):
+    if sd is None:
+        return
+    named = CLAUDE_PANEL.match(desc)
+    if named:
+        # The same report opening as DeepSeek workers, so both kinds of report read the same way.
+        env = _launcher_module('ds_envelope')
+        prompt = str(tool_input.get('prompt') or '')
+        updated = dict(tool_input)
+        if env and 'Status: done | partial | blocked' not in prompt:
+            updated['prompt'] = prompt.rstrip() + '\n\n' + env.note(named.group(1))
+        model = coding_model(named.group(1), tool_input.get('model'))
+        if model:
+            updated['model'] = model
+        if updated != tool_input:
+            print(json.dumps({'hookSpecificOutput': {
+                'hookEventName': 'PreToolUse',
+                'permissionDecision': 'allow',
+                'updatedInput': updated,
+            }}))
         return
     ref = TASK_REF.search(desc)
     if ref:      # "Build field notes (impl-183)": Claude taking over a DeepSeek task keeps its number
@@ -162,6 +199,11 @@ def _finish(sd, m, report, transcript):
     tin, tout, turns = _transcript_totals(transcript)
     if turns:
         m.update(tokens_in=tin, tokens_out=tout, turns=turns)
+    env = _launcher_module('ds_envelope')
+    parsed = env.parse(report or '') if env else None
+    for f in ('status', 'verdict', 'summary', 'left', 'next'):
+        if parsed and parsed.get(f):
+            m['report_' + f] = parsed[f]
     m['report'] = str(sd / 'runs' / m['run_id'] / 'report.md')
     Path(m['report']).parent.mkdir(parents=True, exist_ok=True)
     Path(m['report']).write_text(report or '', encoding='utf-8')
@@ -216,7 +258,9 @@ def agent_post(event):
 
 def agent_stop(event):
     """A background subagent recorded by agent_post has stopped: finish its run."""
-    sd = worker_state(event.get('cwd'))
+    # A subagent started with isolation "worktree" stops in <project>/.claude/worktrees/agent-<id>, which has no
+    # state dir: every OpenSkyrim coding subagent on 2026-09-25 afternoon stayed "working" for this reason.
+    sd = worker_state(re.sub(r'[\\/]\.claude[\\/]worktrees[\\/].*$', '', str(event.get('cwd') or '')))
     if sd is None or not event.get('agent_id'):
         return
     run_id = _index(sd).get(event['agent_id'])
@@ -228,6 +272,18 @@ def agent_stop(event):
     except ValueError:
         return
     _finish(sd, run, event.get('last_assistant_message') or '', event.get('agent_transcript_path'))
+
+
+def _launcher_module(name):
+    """A launcher module (ds_claude, ds_envelope): beside this file once installed, in launcher/ in the
+    harness; None when missing."""
+    here = Path(__file__).resolve().parent
+    for folder in (here, here.parents[1] / 'launcher'):
+        if (folder / (name + '.py')).is_file():
+            if str(folder) not in sys.path:
+                sys.path.insert(0, str(folder))
+            return __import__(name)
+    return None
 
 
 def _ds_claude():
@@ -280,25 +336,35 @@ def claude_note(event, now=None):
         seen = {}
     sid = str(event.get('session_id') or '')
     now = now or time.time()
-    if now - float(seen.get(sid) or 0) < NOTE_EVERY:
-        return ''
     parts = []
-    s = ds_claude.status(d)
-    if s['level'] is None or s['level'] or s['stale']:
-        parts += ds_claude.lines(d)
-    size = context_tokens(event.get('transcript_path'))
-    if size > BIG_CONTEXT:
-        # The user compacts rather than starting new sessions (2026-09-25): a fresh session would also miss
-        # the finish notices of workers this one launched.
-        parts.append('This session re-reads about %dk tokens on every turn. At the next quiet moment (nothing '
-                     'mid-edit, no worker still running whose finish notice this session must get), suggest the '
-                     'user runs /compact. Before that, make sure the state lives in files that survive it (the '
-                     'handoff, the team log, or local/handover-<date>.md). Until then, hand big reading to '
-                     'DeepSeek workers.' % (size // 1000))
-    if not parts:
+    if now - float(seen.get(sid) or 0) >= NOTE_EVERY:
+        s = ds_claude.status(d)
+        if s['level'] is None or s['level'] or s['stale']:
+            parts += ds_claude.lines(d)
+        size = context_tokens(event.get('transcript_path'))
+        if size > BIG_CONTEXT:
+            # The user compacts rather than starting new sessions (2026-09-25): a fresh session would also miss
+            # the finish notices of workers this one launched.
+            parts.append('This session re-reads about %dk tokens on every turn. At the next quiet moment (nothing '
+                         'mid-edit, no worker still running whose finish notice this session must get), suggest the '
+                         'user runs /compact. Before that, make sure the state lives in files that survive it (the '
+                         'handoff, the team log, or local/handover-<date>.md). Until then, hand big reading to '
+                         'DeepSeek workers.' % (size // 1000))
+        if parts:
+            seen[sid] = now
+    # Worker memory, on its own clock (the check runs git, about 0.6 s): the morning report says it only at
+    # session start, and OpenSkyrim's sessions ran for days while the map fell 226 commits behind (2026-09-26).
+    mem_key = 'memory:' + sid
+    checked = False
+    if now - float(seen.get(mem_key) or 0) >= NOTE_EVERY:
+        seen[mem_key] = now
+        checked = True
+        line = memory_note(event.get('cwd'))
+        if line:
+            parts.append(line)
+    if not parts and not checked:
         return ''
     seen = {k: v for k, v in seen.items() if now - float(v or 0) < 86400}
-    seen[sid] = now
     try:
         d.mkdir(parents=True, exist_ok=True)
         tmp = notes.with_name(notes.name + '.tmp')
@@ -309,7 +375,25 @@ def claude_note(event, now=None):
     return '\n'.join(parts)
 
 
+def memory_note(cwd):
+    """'Project memory: map due ...' for a project that runs workers and has a digest due, else ''."""
+    if not cwd or worker_state(cwd) is None:
+        return ''
+    try:
+        import ds_memory             # beside ds_state.py in tools/
+        todo = ds_memory.due(Path(cwd))
+    except Exception:
+        return ''
+    if not todo:
+        return ''
+    return ('Project memory: %s due, so worker briefs are missing recent changes. At a quiet moment, run '
+            '`python "%s" due` and start the command(s) it prints in the background.'
+            % (' and '.join(todo), Path(ds_memory.__file__).resolve().as_posix()))
+
+
 def post_note(event):
+    if event.get('agent_id'):      # a subagent's tool call: these notes are for the session that leads
+        return
     note = claude_note(event)
     if note:
         print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext': note}}))
@@ -347,12 +431,11 @@ MANAGEMENT = re.compile(r'^-(DryRun|List|Integrate|Discard|Post)$', re.I)
 
 def _words(segment):
     """A segment split like a shell would, quotes kept together, so a path with a space is one word.
-    posix=False keeps Windows backslashes; the quotes are stripped afterwards."""
-    try:
-        words = shlex.split(segment, posix=False)
-    except ValueError:
-        words = segment.split()
-    return [w.strip('"\'') for w in words]
+    Windows backslashes are kept; the quotes are removed afterwards. A quote inside a word counts too:
+    shlex split T="C:/.../DeepSeek Workers/tools/ds_impl.ps1" at the space, and the second half then read
+    as a direct call to ds_impl, so `-Integrate` through "$T" was refused as a launch (2026-09-26)."""
+    words = re.findall(r'''(?:[^\s"']+|"[^"]*"?|'[^']*'?)+''', segment)
+    return [re.sub(r'''["']''', '', w) for w in words]
 
 
 def launches_worker(cmd):
@@ -437,12 +520,37 @@ def session_start(event):
         print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': text}}))
 
 
+# A budget instruction to one session has to reach the launcher, which every session shares: on 2026-09-26 a
+# "make it last a month" told to one session was saved in its project memory with no ds_spend.py command, so the
+# old daily limit stayed in force for hours until another session applied `stretch 1m`.
+BUDGET_WORDS = re.compile(r'\b(deepseek|credit|top(ped)?[- ]?up|spend(ing)?|budget)\b', re.I)
+BUDGET_ASK = re.compile(r'\b(last|month|months|week|weeks|days?|limit|cap|stretch|per day|per week|topped|top[- ]?up|raise|lower)\b', re.I)
+
+
+def budget_prompt(event):
+    """A user prompt about the DeepSeek budget: remind the session to apply it with ds_spend.py."""
+    prompt = str(event.get('prompt') or '')
+    if not (BUDGET_WORDS.search(prompt) and BUDGET_ASK.search(prompt)):
+        return
+    tool = Path(__file__).resolve().parent / 'ds_spend.py'
+    if not tool.is_file():
+        tool = Path(__file__).resolve().parents[2] / 'launcher' / 'ds_spend.py'
+    print(json.dumps({'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit', 'additionalContext': (
+        'If this message sets or changes the DeepSeek budget (make the credit last a while, a limit, a top-up), apply it '
+        'with `python "%s"` (`stretch <1m|2w|10d|date>`, `set <dollars> --per day|week|run`, `off`, `status`): the '
+        'launcher enforces that for every session and project. A memory note or a change in your own habits does not '
+        'reach the launcher or the other sessions. Then show the user the `status` line.' % tool.as_posix())}}))
+
+
 def main():
     event = json.load(sys.stdin)
     if event.get('hook_event_name') == 'SessionStart':
         session_start(event)
         return
     hook = event.get('hook_event_name')
+    if hook == 'UserPromptSubmit':
+        budget_prompt(event)
+        return
     if hook == 'SubagentStop':
         agent_stop(event)
         return
@@ -559,7 +667,8 @@ def install(settings_path=None):
 
     for event, matcher, timeout in (('PreToolUse', 'Bash|PowerShell|Agent|Task', 10),
                                     ('PostToolUse', 'Bash|PowerShell|Agent|Task', 10),
-                                    ('SubagentStop', '', 10), ('SessionStart', 'startup|resume', 15)):
+                                    ('SubagentStop', '', 30), ('SessionStart', 'startup|resume', 15),
+                                    ('UserPromptSubmit', '', 10)):
         hooks[event] = without_ours(hooks.get(event, [])) + [
             {'matcher': matcher, 'hooks': [{'type': 'command', 'command': command, 'timeout': timeout}]}]
     path.parent.mkdir(parents=True, exist_ok=True)

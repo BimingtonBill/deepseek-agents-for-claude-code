@@ -159,11 +159,16 @@ The spend figures are estimates, worked out from token counts at DeepSeek's list
   project, and Claude reviews the changes before bringing them in.
 - **Anything from the web is treated as unverified.** Web searchers can't see your project at all, and
   a worker that has read the web can only change a separate copy, which Claude checks first.
-- **It adds one small rule to Claude Code** (a "hook" in `~/.claude/settings.json`, backed up first). It only
-  reacts when Claude starts a DeepSeek lead: it makes sure the lead and each of its workers show up in the
-  Background tasks panel. It ignores everything else. To install without it, run
+- **It adds a hook to Claude Code** (in `~/.claude/settings.json`, backed up first). It:
+  - makes sure every DeepSeek worker, and each of Claude's own helpers, shows up in the Background tasks panel
+    under a clear name (it asks Claude to retry a launch that isn't named that way);
+  - records Claude's helpers beside the workers;
+  - runs Claude's coding helpers on its strongest model unless your Claude plan is running low;
+  - adds short notes for Claude about the budgets, its own pace, and when the project map needs a refresh.
+
+  It doesn't change anything else Claude does. To install without it, run
   `powershell -ExecutionPolicy Bypass -File tools/install-skill.ps1 -NoHooks` from the unzipped folder. To
-  remove it later, delete the two entries that mention `ds_hook.py` from that file.
+  remove it later, delete the entries that mention `ds_hook.py` from that file.
 - **If a job needs a program you don't have**, Claude stops and asks you to install it rather than
   working around it.
 

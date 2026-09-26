@@ -617,7 +617,7 @@ def over(d, run_id, now=None):
 
 
 def stretch_line(d, now=None):
-    """'stretch: credit spread to last until Fri 9 Oct 09:00: $1.18 today (balance $16.91)', or ''."""
+    """'stretch: credit spread to last until Fri 9 Oct 09:00: $1.18 today (balance $20.00)', or ''."""
     now = (now or dt.datetime.now().astimezone()).astimezone()
     st = raw_limits(d).get('stretch')
     if not isinstance(st, dict) or not st.get('until'):
@@ -630,8 +630,12 @@ def stretch_line(d, now=None):
     if share is None:
         return 'stretch:  to last until %s, waiting for a balance reading (the next worker or `balance` fetches it)' % when
     days = (until - midnight(now)).total_seconds() / 86400
-    return 'stretch:  credit spread to last until %s: $%.2f for today, %.1f days left%s' % (
-        when, share, days, ' (a tighter daily limit is also set)' if raw_limits(d).get('day') and raw_limits(d)['day'] < share else '')
+    day = raw_limits(d).get('day')
+    # Name the limit that binds and how to lift it: "a tighter daily limit is also set" left a lower daily cap
+    # binding under a larger stretch share with no word on what to do (2026-09-26).
+    tighter = (' - but the $%.2f/day limit is lower and applies today; `ds_spend.py off --per day` lifts it so the '
+               'stretch share governs' % day) if day and day < share else ''
+    return 'stretch:  credit spread to last until %s: $%.2f for today, %.1f days left%s' % (when, share, days, tighter)
 
 
 def stretch_cmd(d, text, now=None):
